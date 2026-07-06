@@ -422,6 +422,8 @@ function startTimer() {
 
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
+      } else if (secondsLeft.value === 1) {
+        secondsLeft.value = 0
       } else {
         startAction(currentIndex.value + 1)
       }
