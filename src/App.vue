@@ -66,6 +66,7 @@ interface StoredState {
   activePlanId?: string
   plans?: WorkoutPlan[]
   history?: WorkoutSessionLog[]
+  voiceId?: string
   restSeconds?: number
   routine?: Activity[]
 }
@@ -171,7 +172,7 @@ function loadState() {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) {
       const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
-      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [] }
+      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '' }
     }
 
     const parsed = JSON.parse(saved) as StoredState
@@ -188,10 +189,11 @@ function loadState() {
       activePlanId: activePlanId ?? plans[0].id,
       plans,
       history: normalizeHistory(parsed.history),
+      voiceId: String(parsed.voiceId || ''),
     }
   } catch {
     const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
-    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [] }
+    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '' }
   }
 }
 
@@ -199,6 +201,8 @@ const savedState = loadState()
 const activePlanId = ref(savedState.activePlanId)
 const plans = ref<WorkoutPlan[]>(savedState.plans)
 const workoutHistory = ref<WorkoutSessionLog[]>(savedState.history)
+const selectedVoiceId = ref(savedState.voiceId)
+const availableVoices = ref<SpeechSynthesisVoice[]>([])
 const phase = ref<SessionPhase>('idle')
 const currentPage = ref<AppPage>(getPageFromHash())
 const isRunning = ref(false)
@@ -231,6 +235,15 @@ const themeOverrides = {
 
 const currentPlan = computed(() => plans.value.find((plan) => plan.id === activePlanId.value) ?? plans.value[0])
 const planOptions = computed(() => plans.value.map((plan) => ({ label: plan.name || '未命名计划', value: plan.id })))
+const voiceOptions = computed(() => [
+  { label: '自动选择', value: '' },
+  ...availableVoices.value
+    .filter((voice) => voice.lang.toLowerCase().startsWith('zh'))
+    .map((voice) => ({
+      label: `${voice.name} · ${voice.lang}`,
+      value: voice.voiceURI,
+    })),
+])
 const canEditPlan = computed(() => phase.value === 'idle' || phase.value === 'done')
 const restSeconds = computed({
   get: () => currentPlan.value?.restSeconds ?? 30,
@@ -312,7 +325,7 @@ const isManualAction = computed(() => phase.value === 'action' && currentActivit
 const isDraggingActivity = computed(() => draggingActivityId.value !== null)
 
 watch(
-  [activePlanId, plans, workoutHistory],
+  [activePlanId, plans, workoutHistory, selectedVoiceId],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -320,6 +333,7 @@ watch(
         activePlanId: activePlanId.value,
         plans: plans.value,
         history: workoutHistory.value,
+        voiceId: selectedVoiceId.value,
       }),
     )
   },
@@ -399,16 +413,60 @@ function closePanel() {
   }
 }
 
+function loadAvailableVoices() {
+  if (!('speechSynthesis' in window)) return
+  availableVoices.value = window.speechSynthesis.getVoices()
+}
+
+function scoreVoice(voice: SpeechSynthesisVoice) {
+  const lang = voice.lang.toLowerCase()
+  const name = voice.name.toLowerCase()
+  let score = 0
+
+  if (lang === 'zh-cn') score += 80
+  else if (lang.includes('hans')) score += 70
+  else if (lang === 'zh-sg') score += 60
+  else if (lang === 'zh-tw') score += 45
+  else if (lang === 'zh-hk') score += 30
+  else if (lang.startsWith('zh')) score += 25
+
+  if (name.includes('siri')) score += 45
+  if (name.includes('yu-shu') || name.includes('yushu')) score += 40
+  if (name.includes('google')) score += 35
+  if (name.includes('ting-ting') || name.includes('tingting')) score += 30
+  if (name.includes('mandarin') || name.includes('普通话') || name.includes('普通話')) score += 20
+  if (name.includes('compact')) score -= 35
+  if (voice.localService) score += 5
+
+  return score
+}
+
+function getPreferredVoice() {
+  const selectedVoice = availableVoices.value.find((voice) => voice.voiceURI === selectedVoiceId.value)
+  if (selectedVoice) return selectedVoice
+
+  const [bestVoice] = [...availableVoices.value]
+    .filter((voice) => voice.lang.toLowerCase().startsWith('zh'))
+    .sort((first, second) => scoreVoice(second) - scoreVoice(first))
+
+  return bestVoice
+}
+
 function speak(text: string) {
   if (!voiceEnabled.value || !('speechSynthesis' in window)) return
 
   if (speechTimerId) window.clearTimeout(speechTimerId)
 
   const synth = window.speechSynthesis
+  if (availableVoices.value.length === 0) loadAvailableVoices()
+
+  const voice = getPreferredVoice()
   const utterance = new SpeechSynthesisUtterance(text)
-  utterance.lang = 'zh-CN'
-  utterance.rate = 1
-  utterance.pitch = 1
+  utterance.voice = voice ?? null
+  utterance.lang = voice?.lang ?? 'zh-CN'
+  utterance.rate = 0.92
+  utterance.pitch = 1.04
+  utterance.volume = 1
 
   const play = () => {
     synth.resume()
@@ -677,11 +735,18 @@ function stopActivityDrag() {
 
 onMounted(() => {
   window.addEventListener('hashchange', syncPageFromHash)
+  loadAvailableVoices()
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.addEventListener('voiceschanged', loadAvailableVoices)
+  }
 })
 
 onBeforeUnmount(() => {
   if (timerId) window.clearInterval(timerId)
   if (speechTimerId) window.clearTimeout(speechTimerId)
+  if ('speechSynthesis' in window) {
+    window.speechSynthesis.removeEventListener('voiceschanged', loadAvailableVoices)
+  }
   window.removeEventListener('hashchange', syncPageFromHash)
   stopActivityDrag()
 })
@@ -838,6 +903,17 @@ onBeforeUnmount(() => {
               <span>语音</span>
               <NSwitch v-model:value="voiceEnabled" size="small" />
             </div>
+          </div>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-3">
+            <label class="text-sm font-bold text-slate-600" for="voiceSelect">语音声音</label>
+            <NSelect
+              id="voiceSelect"
+              v-model:value="selectedVoiceId"
+              class="mt-2"
+              :options="voiceOptions"
+              :disabled="!voiceEnabled"
+            />
           </div>
 
           <div class="rounded-lg border border-slate-200 bg-white p-3">
