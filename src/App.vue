@@ -212,9 +212,11 @@ const voiceEnabled = ref(true)
 const draggingActivityId = ref<string | null>(null)
 const dragOverActivityId = ref<string | null>(null)
 const activeWorkoutLogId = ref<string | null>(null)
+const isCountdownTransitionPending = ref(false)
 
 let timerId: number | undefined
 let speechTimerId: number | undefined
+let countdownTransitionTimerId: number | undefined
 
 const themeOverrides = {
   common: {
@@ -452,8 +454,11 @@ function getPreferredVoice() {
   return bestVoice
 }
 
-function speak(text: string) {
-  if (!voiceEnabled.value || !('speechSynthesis' in window)) return
+function speak(text: string, onDone?: () => void) {
+  if (!voiceEnabled.value || !('speechSynthesis' in window)) {
+    onDone?.()
+    return
+  }
 
   if (speechTimerId) window.clearTimeout(speechTimerId)
 
@@ -467,6 +472,16 @@ function speak(text: string) {
   utterance.rate = 0.92
   utterance.pitch = 1.04
   utterance.volume = 1
+
+  let hasFinished = false
+  const finish = () => {
+    if (hasFinished) return
+    hasFinished = true
+    onDone?.()
+  }
+
+  utterance.onend = finish
+  utterance.onerror = finish
 
   const play = () => {
     synth.resume()
@@ -482,21 +497,42 @@ function speak(text: string) {
   play()
 }
 
+function clearCountdownTransition() {
+  if (countdownTransitionTimerId) window.clearTimeout(countdownTransitionTimerId)
+  countdownTransitionTimerId = undefined
+  isCountdownTransitionPending.value = false
+}
+
+function finishAfterFinalCountdown(next: () => void) {
+  secondsLeft.value = 0
+  isCountdownTransitionPending.value = true
+
+  const runNext = () => {
+    if (!isCountdownTransitionPending.value) return
+    clearCountdownTransition()
+    if (isRunning.value) next()
+  }
+
+  speak('一', runNext)
+  countdownTransitionTimerId = window.setTimeout(runNext, 1800)
+}
+
 function startTimer() {
   if (timerId) return
 
   timerId = window.setInterval(() => {
     if (!isRunning.value) return
+    if (isCountdownTransitionPending.value) return
 
     if (phase.value === 'rest') {
-      if (secondsLeft.value <= 3 && secondsLeft.value > 0) {
+      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
         speak(String(secondsLeft.value))
       }
 
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
       } else if (secondsLeft.value === 1) {
-        secondsLeft.value = 0
+        finishAfterFinalCountdown(() => startAction(currentIndex.value + 1))
       } else {
         startAction(currentIndex.value + 1)
       }
@@ -504,14 +540,14 @@ function startTimer() {
     }
 
     if (phase.value === 'action' && currentActivity.value?.mode === 'time') {
-      if (secondsLeft.value <= 3 && secondsLeft.value > 0) {
+      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
         speak(String(secondsLeft.value))
       }
 
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
       } else if (secondsLeft.value === 1) {
-        secondsLeft.value = 0
+        finishAfterFinalCountdown(finishAction)
       } else {
         finishAction()
       }
@@ -544,6 +580,7 @@ function beginSession() {
 }
 
 function startAction(index: number) {
+  clearCountdownTransition()
   const activity = routine.value[index]
   if (!activity) {
     completeSession()
@@ -557,6 +594,7 @@ function startAction(index: number) {
 }
 
 function startRest() {
+  clearCountdownTransition()
   const upcoming = routine.value[currentIndex.value + 1]
   if (!upcoming) {
     completeSession()
@@ -584,6 +622,7 @@ function skipCurrent() {
 }
 
 function resetSession() {
+  clearCountdownTransition()
   stopActiveWorkoutLog('stopped')
   isRunning.value = false
   phase.value = 'idle'
@@ -744,6 +783,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (timerId) window.clearInterval(timerId)
   if (speechTimerId) window.clearTimeout(speechTimerId)
+  clearCountdownTransition()
   if ('speechSynthesis' in window) {
     window.speechSynthesis.removeEventListener('voiceschanged', loadAvailableVoices)
   }
