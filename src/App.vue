@@ -210,6 +210,7 @@ const dragOverActivityId = ref<string | null>(null)
 const activeWorkoutLogId = ref<string | null>(null)
 
 let timerId: number | undefined
+let speechTimerId: number | undefined
 
 const themeOverrides = {
   common: {
@@ -401,12 +402,26 @@ function closePanel() {
 function speak(text: string) {
   if (!voiceEnabled.value || !('speechSynthesis' in window)) return
 
-  window.speechSynthesis.cancel()
+  if (speechTimerId) window.clearTimeout(speechTimerId)
+
+  const synth = window.speechSynthesis
   const utterance = new SpeechSynthesisUtterance(text)
   utterance.lang = 'zh-CN'
   utterance.rate = 1
   utterance.pitch = 1
-  window.speechSynthesis.speak(utterance)
+
+  const play = () => {
+    synth.resume()
+    synth.speak(utterance)
+  }
+
+  if (synth.speaking || synth.pending) {
+    synth.cancel()
+    speechTimerId = window.setTimeout(play, 80)
+    return
+  }
+
+  play()
 }
 
 function startTimer() {
@@ -431,8 +446,14 @@ function startTimer() {
     }
 
     if (phase.value === 'action' && currentActivity.value?.mode === 'time') {
+      if (secondsLeft.value <= 3 && secondsLeft.value > 0) {
+        speak(String(secondsLeft.value))
+      }
+
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
+      } else if (secondsLeft.value === 1) {
+        secondsLeft.value = 0
       } else {
         finishAction()
       }
@@ -510,6 +531,7 @@ function resetSession() {
   phase.value = 'idle'
   currentIndex.value = 0
   secondsLeft.value = 0
+  if (speechTimerId) window.clearTimeout(speechTimerId)
   if ('speechSynthesis' in window) window.speechSynthesis.cancel()
 }
 
@@ -659,6 +681,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (timerId) window.clearInterval(timerId)
+  if (speechTimerId) window.clearTimeout(speechTimerId)
   window.removeEventListener('hashchange', syncPageFromHash)
   stopActivityDrag()
 })
