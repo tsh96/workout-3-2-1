@@ -2,7 +2,9 @@
 import {
   ArrowLeft,
   ChevronRight,
+  Copy,
   GripVertical,
+  History,
   Pause,
   Play,
   Plus,
@@ -26,14 +28,46 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type ActivityMode = 'reps' | 'time'
-type AppPage = 'workout' | 'settings'
+type AppPage = 'workout' | 'settings' | 'history'
 type SessionPhase = 'idle' | 'action' | 'rest' | 'done'
+type WorkoutLogStatus = 'started' | 'completed' | 'stopped'
 
 interface Activity {
   id: string
   name: string
   mode: ActivityMode
   target: number
+}
+
+interface WorkoutPlan {
+  id: string
+  name: string
+  restSeconds: number
+  routine: Activity[]
+}
+
+interface WorkoutPlanSnapshot {
+  name: string
+  restSeconds: number
+  routine: Activity[]
+}
+
+interface WorkoutSessionLog {
+  id: string
+  planId: string
+  planName: string
+  startedAt: string
+  completedAt?: string
+  status: WorkoutLogStatus
+  plan: WorkoutPlanSnapshot
+}
+
+interface StoredState {
+  activePlanId?: string
+  plans?: WorkoutPlan[]
+  history?: WorkoutSessionLog[]
+  restSeconds?: number
+  routine?: Activity[]
 }
 
 const STORAGE_KEY = 'workout-3-2-1-state'
@@ -50,36 +84,130 @@ const defaultRoutine: Activity[] = [
   { id: 'mountain', name: '登山跑', mode: 'time', target: 30 },
 ]
 
+function createId(prefix: string) {
+  if ('randomUUID' in crypto) return `${prefix}-${crypto.randomUUID()}`
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function cloneActivities(activities: Activity[]) {
+  return activities.map((activity) => ({ ...activity }))
+}
+
+function normalizeActivity(activity: Partial<Activity>, index: number): Activity {
+  const mode: ActivityMode = activity.mode === 'time' ? 'time' : 'reps'
+
+  return {
+    id: activity.id || createId(`activity-${index + 1}`),
+    name: String(activity.name || `动作 ${index + 1}`),
+    mode,
+    target: Math.max(1, Number(activity.target) || 1),
+  }
+}
+
+function normalizeRoutine(routine: unknown): Activity[] {
+  if (!Array.isArray(routine) || routine.length === 0) return cloneActivities(defaultRoutine)
+
+  return routine.map((activity, index) => normalizeActivity(activity as Partial<Activity>, index))
+}
+
+function createPlan(name: string, restSeconds = 30, routine: Activity[] = defaultRoutine): WorkoutPlan {
+  return {
+    id: createId('plan'),
+    name,
+    restSeconds: Math.max(3, Number(restSeconds) || 30),
+    routine: cloneActivities(routine),
+  }
+}
+
+function normalizePlan(plan: Partial<WorkoutPlan>, index: number): WorkoutPlan {
+  return {
+    id: plan.id || createId(`plan-${index + 1}`),
+    name: String(plan.name || `计划 ${index + 1}`),
+    restSeconds: Math.max(3, Number(plan.restSeconds) || 30),
+    routine: normalizeRoutine(plan.routine),
+  }
+}
+
+function toIsoDate(value: unknown) {
+  const timestamp = Date.parse(String(value || ''))
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
+}
+
+function normalizeHistory(history: unknown): WorkoutSessionLog[] {
+  if (!Array.isArray(history)) return []
+
+  return history
+    .map((entry, index): WorkoutSessionLog | null => {
+      const log = entry as Partial<WorkoutSessionLog>
+      const startedAt = toIsoDate(log.startedAt)
+      if (!startedAt) return null
+
+      const completedAt = toIsoDate(log.completedAt)
+      const status: WorkoutLogStatus =
+        log.status === 'completed' || log.status === 'stopped' ? log.status : 'started'
+      const snapshot = log.plan as Partial<WorkoutPlanSnapshot> | undefined
+
+      const normalizedLog: WorkoutSessionLog = {
+        id: log.id || createId(`session-${index + 1}`),
+        planId: String(log.planId || ''),
+        planName: String(log.planName || snapshot?.name || '未命名计划'),
+        startedAt,
+        status,
+        plan: {
+          name: String(snapshot?.name || log.planName || '未命名计划'),
+          restSeconds: Math.max(3, Number(snapshot?.restSeconds) || 30),
+          routine: normalizeRoutine(snapshot?.routine),
+        },
+      }
+
+      if (completedAt) normalizedLog.completedAt = completedAt
+      return normalizedLog
+    })
+    .filter((entry): entry is WorkoutSessionLog => entry !== null)
+}
+
 function loadState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) return { restSeconds: 30, routine: defaultRoutine }
+    if (!saved) {
+      const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
+      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [] }
+    }
 
-    const parsed = JSON.parse(saved) as { restSeconds?: number; routine?: Activity[] }
-    const routine = Array.isArray(parsed.routine) && parsed.routine.length > 0 ? parsed.routine : defaultRoutine
+    const parsed = JSON.parse(saved) as StoredState
+    const savedPlans =
+      Array.isArray(parsed.plans) && parsed.plans.length > 0
+        ? parsed.plans
+        : [createPlan('基础循环', parsed.restSeconds, normalizeRoutine(parsed.routine))]
+    const plans = savedPlans.map((plan, index) => normalizePlan(plan, index))
+    const activePlanId = plans.some((plan) => plan.id === parsed.activePlanId)
+      ? parsed.activePlanId
+      : plans[0]?.id
+
     return {
-      restSeconds: Math.max(3, Number(parsed.restSeconds) || 30),
-      routine: routine.map((activity) => ({
-        ...activity,
-        target: Math.max(1, Number(activity.target) || 1),
-      })),
+      activePlanId: activePlanId ?? plans[0].id,
+      plans,
+      history: normalizeHistory(parsed.history),
     }
   } catch {
-    return { restSeconds: 30, routine: defaultRoutine }
+    const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
+    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [] }
   }
 }
 
 const savedState = loadState()
-const restSeconds = ref(savedState.restSeconds)
-const routine = ref<Activity[]>(savedState.routine)
+const activePlanId = ref(savedState.activePlanId)
+const plans = ref<WorkoutPlan[]>(savedState.plans)
+const workoutHistory = ref<WorkoutSessionLog[]>(savedState.history)
 const phase = ref<SessionPhase>('idle')
-const currentPage = ref<AppPage>(window.location.hash === '#settings' ? 'settings' : 'workout')
+const currentPage = ref<AppPage>(getPageFromHash())
 const isRunning = ref(false)
 const currentIndex = ref(0)
 const secondsLeft = ref(0)
 const voiceEnabled = ref(true)
 const draggingActivityId = ref<string | null>(null)
 const dragOverActivityId = ref<string | null>(null)
+const activeWorkoutLogId = ref<string | null>(null)
 
 let timerId: number | undefined
 
@@ -100,11 +228,27 @@ const themeOverrides = {
   },
 }
 
+const currentPlan = computed(() => plans.value.find((plan) => plan.id === activePlanId.value) ?? plans.value[0])
+const planOptions = computed(() => plans.value.map((plan) => ({ label: plan.name || '未命名计划', value: plan.id })))
+const canEditPlan = computed(() => phase.value === 'idle' || phase.value === 'done')
+const restSeconds = computed({
+  get: () => currentPlan.value?.restSeconds ?? 30,
+  set: (value: number | null) => {
+    if (!currentPlan.value) return
+    currentPlan.value.restSeconds = Math.max(3, Number(value) || 30)
+  },
+})
+const routine = computed({
+  get: () => currentPlan.value?.routine ?? [],
+  set: (value: Activity[]) => {
+    if (!currentPlan.value) return
+    currentPlan.value.routine = value
+  },
+})
 const currentActivity = computed(() => routine.value[currentIndex.value])
 const nextActivity = computed(() => {
   if (phase.value === 'idle') return routine.value[1]
-  const nextIndex = phase.value === 'rest' ? currentIndex.value + 1 : currentIndex.value + 1
-  return routine.value[nextIndex]
+  return routine.value[currentIndex.value + 1]
 })
 
 const totalForPhase = computed(() => {
@@ -167,25 +311,61 @@ const isManualAction = computed(() => phase.value === 'action' && currentActivit
 const isDraggingActivity = computed(() => draggingActivityId.value !== null)
 
 watch(
-  [restSeconds, routine],
+  [activePlanId, plans, workoutHistory],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        restSeconds: restSeconds.value,
-        routine: routine.value,
+        activePlanId: activePlanId.value,
+        plans: plans.value,
+        history: workoutHistory.value,
       }),
     )
   },
   { deep: true },
 )
 
+watch(activePlanId, () => {
+  resetSession()
+})
+
+function getPageFromHash(): AppPage {
+  if (window.location.hash === '#settings') return 'settings'
+  if (window.location.hash === '#history') return 'history'
+  return 'workout'
+}
+
 function formatActionTarget(activity: Activity) {
   return `${activity.target} ${activity.mode === 'reps' ? '次' : '秒'}`
 }
 
+function formatDateTime(value: string) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value))
+}
+
+function formatDuration(log: WorkoutSessionLog) {
+  if (!log.completedAt) return '进行记录'
+
+  const seconds = Math.max(0, Math.round((Date.parse(log.completedAt) - Date.parse(log.startedAt)) / 1000))
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  if (minutes <= 0) return `${remainder} 秒`
+  return `${minutes} 分 ${remainder} 秒`
+}
+
+function statusText(status: WorkoutLogStatus) {
+  if (status === 'completed') return '已完成'
+  if (status === 'stopped') return '已停止'
+  return '已开始'
+}
+
 function syncPageFromHash() {
-  currentPage.value = window.location.hash === '#settings' ? 'settings' : 'workout'
+  currentPage.value = getPageFromHash()
   stopActivityDrag()
 }
 
@@ -199,11 +379,21 @@ function openSettings() {
   window.location.hash = 'settings'
 }
 
-function closeSettings() {
+function openHistory() {
+  stopActivityDrag()
+  if (window.location.hash === '#history') {
+    currentPage.value = 'history'
+    return
+  }
+
+  window.location.hash = 'history'
+}
+
+function closePanel() {
   stopActivityDrag()
   currentPage.value = 'workout'
 
-  if (window.location.hash === '#settings') {
+  if (window.location.hash === '#settings' || window.location.hash === '#history') {
     window.history.pushState(null, '', `${window.location.pathname}${window.location.search}`)
   }
 }
@@ -265,8 +455,9 @@ function togglePrimary() {
 }
 
 function beginSession() {
-  if (routine.value.length === 0) return
+  if (routine.value.length === 0 || !currentPlan.value) return
   isRunning.value = true
+  recordWorkoutStart()
   startAction(0)
   startTimer()
 }
@@ -312,6 +503,7 @@ function skipCurrent() {
 }
 
 function resetSession() {
+  stopActiveWorkoutLog('stopped')
   isRunning.value = false
   phase.value = 'idle'
   currentIndex.value = 0
@@ -323,16 +515,77 @@ function completeSession() {
   isRunning.value = false
   phase.value = 'done'
   secondsLeft.value = 0
+  stopActiveWorkoutLog('completed')
   speak('训练完成')
 }
 
+function recordWorkoutStart() {
+  const plan = currentPlan.value
+  if (!plan) return
+
+  const log: WorkoutSessionLog = {
+    id: createId('session'),
+    planId: plan.id,
+    planName: plan.name || '未命名计划',
+    startedAt: new Date().toISOString(),
+    status: 'started',
+    plan: {
+      name: plan.name || '未命名计划',
+      restSeconds: plan.restSeconds,
+      routine: cloneActivities(plan.routine),
+    },
+  }
+
+  activeWorkoutLogId.value = log.id
+  workoutHistory.value = [log, ...workoutHistory.value].slice(0, 100)
+}
+
+function stopActiveWorkoutLog(status: Exclude<WorkoutLogStatus, 'started'>) {
+  const logId = activeWorkoutLogId.value
+  if (!logId) return
+
+  const log = workoutHistory.value.find((entry) => entry.id === logId)
+  if (log && log.status === 'started') {
+    log.status = status
+    log.completedAt = new Date().toISOString()
+  }
+
+  activeWorkoutLogId.value = null
+}
+
+function addPlan() {
+  const plan = createPlan(`计划 ${plans.value.length + 1}`)
+  plans.value.push(plan)
+  activePlanId.value = plan.id
+}
+
+function duplicateCurrentPlan() {
+  const plan = currentPlan.value
+  if (!plan) return
+
+  const duplicatedPlan = createPlan(`${plan.name || '未命名计划'} 副本`, plan.restSeconds, plan.routine)
+  plans.value.push(duplicatedPlan)
+  activePlanId.value = duplicatedPlan.id
+}
+
+function removeCurrentPlan() {
+  if (plans.value.length <= 1 || !currentPlan.value) return
+
+  const currentPlanIndex = plans.value.findIndex((plan) => plan.id === currentPlan.value?.id)
+  plans.value = plans.value.filter((plan) => plan.id !== currentPlan.value?.id)
+  activePlanId.value = plans.value[Math.max(0, currentPlanIndex - 1)]?.id ?? plans.value[0]?.id
+}
+
 function addActivity() {
-  routine.value.push({
-    id: crypto.randomUUID(),
-    name: '新动作',
-    mode: 'reps',
-    target: 10,
-  })
+  routine.value = [
+    ...routine.value,
+    {
+      id: createId('activity'),
+      name: '新动作',
+      mode: 'reps',
+      target: 10,
+    },
+  ]
 }
 
 function removeActivity(id: string) {
@@ -341,8 +594,12 @@ function removeActivity(id: string) {
   resetSession()
 }
 
+function deleteHistoryEntry(id: string) {
+  workoutHistory.value = workoutHistory.value.filter((entry) => entry.id !== id)
+}
+
 function startActivityDrag(event: PointerEvent, activityId: string) {
-  if (isRunning.value || routine.value.length <= 1) return
+  if (!canEditPlan.value || routine.value.length <= 1) return
 
   event.preventDefault()
   draggingActivityId.value = activityId
@@ -409,13 +666,22 @@ onBeforeUnmount(() => {
   <NConfigProvider :theme-overrides="themeOverrides">
     <main class="min-h-screen bg-[#f7f8f5] text-slate-950">
       <div class="mx-auto flex min-h-screen w-full max-w-md flex-col px-4 pb-6 pt-[max(18px,env(safe-area-inset-top))]">
-        <header v-if="currentPage === 'workout'" class="flex items-center justify-between">
-          <div>
+        <header v-if="currentPage === 'workout'" class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
             <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700">Workout 3-2-1</p>
-            <h1 class="mt-1 text-2xl font-black leading-tight">训练辅助器</h1>
+            <h1 class="mt-1 truncate text-2xl font-black leading-tight">训练辅助器</h1>
           </div>
 
           <div class="flex items-center gap-2">
+            <NTooltip trigger="hover">
+              <template #trigger>
+                <NButton circle secondary type="primary" aria-label="训练记录" @click="openHistory">
+                  <History :size="19" />
+                </NButton>
+              </template>
+              训练记录
+            </NTooltip>
+
             <NTooltip trigger="hover">
               <template #trigger>
                 <NButton circle secondary type="primary" aria-label="设置" @click="openSettings">
@@ -437,7 +703,18 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <section v-if="currentPage === 'workout'" class="mt-5 rounded-lg border border-teal-900/10 bg-white p-4 shadow-soft">
+        <section v-if="currentPage === 'workout'" class="mt-4">
+          <label class="text-sm font-bold text-slate-600" for="activePlan">训练计划</label>
+          <NSelect
+            id="activePlan"
+            v-model:value="activePlanId"
+            class="mt-2"
+            :options="planOptions"
+            :disabled="!canEditPlan"
+          />
+        </section>
+
+        <section v-if="currentPage === 'workout'" class="mt-4 rounded-lg border border-teal-900/10 bg-white p-4 shadow-soft">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
               <p class="text-sm font-bold text-teal-700">{{ phase === 'rest' ? '当前休息' : '当前动作' }}</p>
@@ -511,12 +788,12 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-else class="space-y-3">
+        <section v-else-if="currentPage === 'settings'" class="space-y-3">
           <header class="flex items-center justify-between">
             <div class="flex min-w-0 items-center gap-3">
               <NTooltip trigger="hover">
                 <template #trigger>
-                  <NButton circle aria-label="返回训练" @click="closeSettings">
+                  <NButton circle aria-label="返回训练" @click="closePanel">
                     <ArrowLeft :size="19" />
                   </NButton>
                 </template>
@@ -531,10 +808,65 @@ onBeforeUnmount(() => {
           </header>
 
           <div class="flex items-center justify-between">
-            <h2 class="text-base font-black">训练参数</h2>
+            <h2 class="text-base font-black">训练计划</h2>
             <div class="flex items-center gap-2 text-sm font-bold text-slate-600">
               <span>语音</span>
               <NSwitch v-model:value="voiceEnabled" size="small" />
+            </div>
+          </div>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-3">
+            <label class="text-sm font-bold text-slate-600" for="planSelect">当前计划</label>
+            <NSelect
+              id="planSelect"
+              v-model:value="activePlanId"
+              class="mt-2"
+              :options="planOptions"
+              :disabled="!canEditPlan"
+            />
+
+            <label class="mt-3 block text-sm font-bold text-slate-600" for="planName">计划名称</label>
+            <NInput
+              id="planName"
+              v-model:value="currentPlan.name"
+              class="mt-2"
+              placeholder="计划名称"
+              :disabled="!canEditPlan"
+            />
+
+            <div class="mt-3 grid grid-cols-[1fr_auto_auto] gap-2">
+              <NButton secondary type="primary" :disabled="!canEditPlan" @click="addPlan">
+                <template #icon>
+                  <Plus :size="18" />
+                </template>
+                新计划
+              </NButton>
+
+              <NTooltip trigger="hover">
+                <template #trigger>
+                  <NButton aria-label="复制当前计划" :disabled="!canEditPlan" @click="duplicateCurrentPlan">
+                    <template #icon>
+                      <Copy :size="18" />
+                    </template>
+                  </NButton>
+                </template>
+                复制当前计划
+              </NTooltip>
+
+              <NTooltip trigger="hover">
+                <template #trigger>
+                  <NButton
+                    aria-label="删除当前计划"
+                    :disabled="plans.length <= 1 || !canEditPlan"
+                    @click="removeCurrentPlan"
+                  >
+                    <template #icon>
+                      <Trash2 :size="18" />
+                    </template>
+                  </NButton>
+                </template>
+                删除当前计划
+              </NTooltip>
             </div>
           </div>
 
@@ -548,7 +880,7 @@ onBeforeUnmount(() => {
               :max="600"
               :step="5"
               button-placement="both"
-              :disabled="isRunning"
+              :disabled="!canEditPlan"
             />
           </div>
 
@@ -572,7 +904,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="flex h-9 w-8 shrink-0 touch-none items-center justify-center rounded-lg text-slate-400 transition enabled:cursor-grab enabled:hover:bg-slate-100 enabled:hover:text-teal-700 enabled:active:cursor-grabbing disabled:opacity-35"
                   aria-label="拖动排序"
-                  :disabled="isRunning || routine.length <= 1"
+                  :disabled="!canEditPlan || routine.length <= 1"
                   @pointerdown="startActivityDrag($event, activity.id)"
                 >
                   <GripVertical :size="18" />
@@ -583,13 +915,13 @@ onBeforeUnmount(() => {
                 <NInput
                   v-model:value="activity.name"
                   placeholder="动作名称"
-                  :disabled="isRunning || isDraggingActivity"
+                  :disabled="!canEditPlan || isDraggingActivity"
                 />
                 <NButton
                   quaternary
                   circle
                   aria-label="删除动作"
-                  :disabled="routine.length <= 1 || isRunning || isDraggingActivity"
+                  :disabled="routine.length <= 1 || !canEditPlan || isDraggingActivity"
                   @click="removeActivity(activity.id)"
                 >
                   <Trash2 :size="18" />
@@ -600,7 +932,7 @@ onBeforeUnmount(() => {
                 <NSelect
                   v-model:value="activity.mode"
                   :options="modeOptions"
-                  :disabled="isRunning || isDraggingActivity"
+                  :disabled="!canEditPlan || isDraggingActivity"
                 />
                 <NInputNumber
                   v-model:value="activity.target"
@@ -608,18 +940,80 @@ onBeforeUnmount(() => {
                   :max="999"
                   :step="activity.mode === 'reps' ? 1 : 5"
                   button-placement="both"
-                  :disabled="isRunning || isDraggingActivity"
+                  :disabled="!canEditPlan || isDraggingActivity"
                 />
               </div>
             </article>
           </div>
 
-          <NButton secondary type="primary" block :disabled="isRunning" @click="addActivity">
+          <NButton secondary type="primary" block :disabled="!canEditPlan" @click="addActivity">
             <template #icon>
               <Plus :size="18" />
             </template>
             添加动作
           </NButton>
+        </section>
+
+        <section v-else class="space-y-3">
+          <header class="flex items-center justify-between">
+            <div class="flex min-w-0 items-center gap-3">
+              <NTooltip trigger="hover">
+                <template #trigger>
+                  <NButton circle aria-label="返回训练" @click="closePanel">
+                    <ArrowLeft :size="19" />
+                  </NButton>
+                </template>
+                返回训练
+              </NTooltip>
+
+              <div class="min-w-0">
+                <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700">Workout 3-2-1</p>
+                <h1 class="mt-1 text-2xl font-black leading-tight">训练记录</h1>
+              </div>
+            </div>
+          </header>
+
+          <div v-if="workoutHistory.length === 0" class="rounded-lg border border-slate-200 bg-white p-4 text-center">
+            <p class="text-base font-black">暂无记录</p>
+            <p class="mt-1 text-sm font-semibold text-slate-500">开始训练后会自动保存计划快照。</p>
+          </div>
+
+          <article
+            v-for="log in workoutHistory"
+            v-else
+            :key="log.id"
+            class="rounded-lg border border-slate-200 bg-white p-3"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <p class="text-xs font-bold uppercase tracking-[0.14em] text-teal-700">{{ statusText(log.status) }}</p>
+                <h2 class="mt-1 truncate text-lg font-black">{{ log.planName }}</h2>
+                <p class="mt-1 text-sm font-semibold text-slate-500">
+                  {{ formatDateTime(log.startedAt) }} · {{ formatDuration(log) }}
+                </p>
+              </div>
+
+              <NButton quaternary circle aria-label="删除记录" @click="deleteHistoryEntry(log.id)">
+                <Trash2 :size="18" />
+              </NButton>
+            </div>
+
+            <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2">
+              <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
+                休息 {{ log.plan.restSeconds }} 秒
+              </p>
+              <ol class="mt-2 space-y-1">
+                <li
+                  v-for="(activity, index) in log.plan.routine"
+                  :key="`${log.id}-${activity.id}`"
+                  class="flex items-center justify-between gap-3 text-sm font-bold"
+                >
+                  <span class="min-w-0 truncate text-slate-800">{{ index + 1 }}. {{ activity.name }}</span>
+                  <span class="shrink-0 text-slate-500">{{ formatActionTarget(activity) }}</span>
+                </li>
+              </ol>
+            </div>
+          </article>
         </section>
 
         <footer class="mt-auto flex items-center justify-center gap-1 pb-[max(0px,env(safe-area-inset-bottom))] pt-6 text-xs font-bold text-slate-400">
