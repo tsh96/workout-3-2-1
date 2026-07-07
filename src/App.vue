@@ -29,7 +29,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 type ActivityMode = 'reps' | 'time'
 type AppPage = 'workout' | 'settings' | 'history'
-type SessionPhase = 'idle' | 'action' | 'rest' | 'done'
+type SessionPhase = 'idle' | 'countdown' | 'action' | 'rest' | 'done'
 type WorkoutLogStatus = 'started' | 'completed' | 'stopped'
 
 interface Activity {
@@ -42,12 +42,14 @@ interface Activity {
 interface WorkoutPlan {
   id: string
   name: string
+  startCountdownSeconds: number
   restSeconds: number
   routine: Activity[]
 }
 
 interface WorkoutPlanSnapshot {
   name: string
+  startCountdownSeconds: number
   restSeconds: number
   routine: Activity[]
 }
@@ -67,6 +69,7 @@ interface StoredState {
   plans?: WorkoutPlan[]
   history?: WorkoutSessionLog[]
   voiceId?: string
+  startCountdownSeconds?: number
   restSeconds?: number
   routine?: Activity[]
 }
@@ -111,10 +114,22 @@ function normalizeRoutine(routine: unknown): Activity[] {
   return routine.map((activity, index) => normalizeActivity(activity as Partial<Activity>, index))
 }
 
-function createPlan(name: string, restSeconds = 30, routine: Activity[] = defaultRoutine): WorkoutPlan {
+function normalizeStartCountdown(value: unknown, fallback = 5) {
+  const numeric = Number(value)
+  const seconds = Number.isFinite(numeric) ? numeric : fallback
+  return Math.max(0, Math.min(60, Math.round(seconds)))
+}
+
+function createPlan(
+  name: string,
+  restSeconds = 30,
+  routine: Activity[] = defaultRoutine,
+  startCountdownSeconds = 5,
+): WorkoutPlan {
   return {
     id: createId('plan'),
     name,
+    startCountdownSeconds: normalizeStartCountdown(startCountdownSeconds),
     restSeconds: Math.max(3, Number(restSeconds) || 30),
     routine: cloneActivities(routine),
   }
@@ -124,6 +139,7 @@ function normalizePlan(plan: Partial<WorkoutPlan>, index: number): WorkoutPlan {
   return {
     id: plan.id || createId(`plan-${index + 1}`),
     name: String(plan.name || `计划 ${index + 1}`),
+    startCountdownSeconds: normalizeStartCountdown(plan.startCountdownSeconds),
     restSeconds: Math.max(3, Number(plan.restSeconds) || 30),
     routine: normalizeRoutine(plan.routine),
   }
@@ -156,6 +172,7 @@ function normalizeHistory(history: unknown): WorkoutSessionLog[] {
         status,
         plan: {
           name: String(snapshot?.name || log.planName || '未命名计划'),
+          startCountdownSeconds: normalizeStartCountdown(snapshot?.startCountdownSeconds, 0),
           restSeconds: Math.max(3, Number(snapshot?.restSeconds) || 30),
           routine: normalizeRoutine(snapshot?.routine),
         },
@@ -179,7 +196,14 @@ function loadState() {
     const savedPlans =
       Array.isArray(parsed.plans) && parsed.plans.length > 0
         ? parsed.plans
-        : [createPlan('基础循环', parsed.restSeconds, normalizeRoutine(parsed.routine))]
+        : [
+            createPlan(
+              '基础循环',
+              parsed.restSeconds,
+              normalizeRoutine(parsed.routine),
+              parsed.startCountdownSeconds,
+            ),
+          ]
     const plans = savedPlans.map((plan, index) => normalizePlan(plan, index))
     const activePlanId = plans.some((plan) => plan.id === parsed.activePlanId)
       ? parsed.activePlanId
@@ -247,6 +271,13 @@ const voiceOptions = computed(() => [
     })),
 ])
 const canEditPlan = computed(() => phase.value === 'idle' || phase.value === 'done')
+const startCountdownSeconds = computed({
+  get: () => currentPlan.value?.startCountdownSeconds ?? 5,
+  set: (value: number | null) => {
+    if (!currentPlan.value) return
+    currentPlan.value.startCountdownSeconds = normalizeStartCountdown(value)
+  },
+})
 const restSeconds = computed({
   get: () => currentPlan.value?.restSeconds ?? 30,
   set: (value: number | null) => {
@@ -263,11 +294,13 @@ const routine = computed({
 })
 const currentActivity = computed(() => routine.value[currentIndex.value])
 const nextActivity = computed(() => {
+  if (phase.value === 'countdown') return routine.value[0]
   if (phase.value === 'idle') return routine.value[1]
   return routine.value[currentIndex.value + 1]
 })
 
 const totalForPhase = computed(() => {
+  if (phase.value === 'countdown') return startCountdownSeconds.value
   if (phase.value === 'rest') return restSeconds.value
   if (phase.value === 'action' && currentActivity.value?.mode === 'time') return currentActivity.value.target
   return 0
@@ -279,10 +312,12 @@ const progressPercentage = computed(() => {
 })
 
 const displayNumber = computed(() => {
+  if (phase.value === 'countdown') return secondsLeft.value
+  if (phase.value === 'idle') return startCountdownSeconds.value
   if (phase.value === 'rest') return secondsLeft.value
   if (phase.value === 'action' && currentActivity.value?.mode === 'time') return secondsLeft.value
   if (phase.value === 'action') return currentActivity.value?.target ?? 0
-  return restSeconds.value
+  return 0
 })
 
 const displayUnit = computed(() => {
@@ -292,12 +327,17 @@ const displayUnit = computed(() => {
 
 const statusTitle = computed(() => {
   if (phase.value === 'done') return '训练完成'
+  if (phase.value === 'countdown') return '准备'
   if (phase.value === 'rest') return '休息'
   if (phase.value === 'action') return currentActivity.value?.name ?? '动作'
   return '准备开始'
 })
 
 const currentText = computed(() => {
+  if (phase.value === 'countdown') {
+    const activity = routine.value[0]
+    return activity ? `即将开始 ${activity.name} · ${formatActionTarget(activity)}` : '暂无动作'
+  }
   if (phase.value === 'rest') return `休息 ${restSeconds.value} 秒`
   if (phase.value === 'done') return '已完成'
   const activity = phase.value === 'idle' ? routine.value[0] : currentActivity.value
@@ -322,8 +362,12 @@ const sessionStateLabel = computed(() => {
   return isRunning.value ? '进行中' : '已暂停'
 })
 
-const canSkip = computed(() => phase.value === 'action' || phase.value === 'rest')
+const canSkip = computed(() => phase.value === 'countdown' || phase.value === 'action' || phase.value === 'rest')
 const isManualAction = computed(() => phase.value === 'action' && currentActivity.value?.mode === 'reps')
+const timerLabel = computed(() => {
+  if (phase.value === 'countdown' || phase.value === 'idle') return '开始倒计时'
+  return isManualAction.value ? '目标' : '倒计时'
+})
 const isDraggingActivity = computed(() => draggingActivityId.value !== null)
 
 watch(
@@ -336,6 +380,7 @@ watch(
         plans: plans.value,
         history: workoutHistory.value,
         voiceId: selectedVoiceId.value,
+        startCountdownSeconds: startCountdownSeconds.value,
       }),
     )
   },
@@ -524,6 +569,21 @@ function startTimer() {
     if (!isRunning.value) return
     if (isCountdownTransitionPending.value) return
 
+    if (phase.value === 'countdown') {
+      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
+        speak(String(secondsLeft.value))
+      }
+
+      if (secondsLeft.value > 1) {
+        secondsLeft.value -= 1
+      } else if (secondsLeft.value === 1) {
+        finishAfterFinalCountdown(() => startAction(0))
+      } else {
+        startAction(0)
+      }
+      return
+    }
+
     if (phase.value === 'rest') {
       if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
         speak(String(secondsLeft.value))
@@ -575,8 +635,26 @@ function beginSession() {
   if (routine.value.length === 0 || !currentPlan.value) return
   isRunning.value = true
   recordWorkoutStart()
-  startAction(0)
+  if (startCountdownSeconds.value > 0) {
+    startStartCountdown()
+  } else {
+    startAction(0)
+  }
   startTimer()
+}
+
+function startStartCountdown() {
+  clearCountdownTransition()
+  const firstActivity = routine.value[0]
+  if (!firstActivity) {
+    completeSession()
+    return
+  }
+
+  currentIndex.value = 0
+  phase.value = 'countdown'
+  secondsLeft.value = startCountdownSeconds.value
+  speak(`准备，${startCountdownSeconds.value}秒后开始，第一个动作是${firstActivity.name}`)
 }
 
 function startAction(index: number) {
@@ -611,6 +689,11 @@ function finishAction() {
 }
 
 function skipCurrent() {
+  if (phase.value === 'countdown') {
+    startAction(0)
+    return
+  }
+
   if (phase.value === 'action') {
     finishAction()
     return
@@ -652,6 +735,7 @@ function recordWorkoutStart() {
     status: 'started',
     plan: {
       name: plan.name || '未命名计划',
+      startCountdownSeconds: plan.startCountdownSeconds,
       restSeconds: plan.restSeconds,
       routine: cloneActivities(plan.routine),
     },
@@ -684,7 +768,12 @@ function duplicateCurrentPlan() {
   const plan = currentPlan.value
   if (!plan) return
 
-  const duplicatedPlan = createPlan(`${plan.name || '未命名计划'} 副本`, plan.restSeconds, plan.routine)
+  const duplicatedPlan = createPlan(
+    `${plan.name || '未命名计划'} 副本`,
+    plan.restSeconds,
+    plan.routine,
+    plan.startCountdownSeconds,
+  )
   plans.value.push(duplicatedPlan)
   activePlanId.value = duplicatedPlan.id
 }
@@ -847,7 +936,9 @@ onBeforeUnmount(() => {
         <section v-if="currentPage === 'workout'" class="mt-4 rounded-lg border border-teal-900/10 bg-white p-4 shadow-soft">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <p class="text-sm font-bold text-teal-700">{{ phase === 'rest' ? '当前休息' : '当前动作' }}</p>
+              <p class="text-sm font-bold text-teal-700">
+                {{ phase === 'countdown' ? '开始准备' : phase === 'rest' ? '当前休息' : '当前动作' }}
+              </p>
               <h2 class="mt-1 truncate text-3xl font-black leading-none">{{ statusTitle }}</h2>
               <p class="mt-3 text-sm font-semibold text-slate-500">{{ currentText }}</p>
             </div>
@@ -867,7 +958,7 @@ onBeforeUnmount(() => {
           <div class="mt-5 flex items-end justify-between rounded-lg bg-[#101827] px-4 py-4 text-white">
             <div>
               <p class="text-xs font-bold uppercase tracking-[0.14em] text-teal-200">
-                {{ isManualAction ? '目标' : '倒计时' }}
+                {{ timerLabel }}
               </p>
               <div class="mt-1 flex items-baseline gap-2">
                 <span class="text-6xl font-black tabular-nums leading-none">{{ displayNumber }}</span>
@@ -1012,6 +1103,20 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="rounded-lg border border-slate-200 bg-white p-3">
+            <label class="text-sm font-bold text-slate-600" for="startCountdownSeconds">开始倒计时</label>
+            <NInputNumber
+              id="startCountdownSeconds"
+              v-model:value="startCountdownSeconds"
+              class="mt-2 w-full"
+              :min="0"
+              :max="60"
+              :step="1"
+              button-placement="both"
+              :disabled="!canEditPlan"
+            />
+          </div>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-3">
             <label class="text-sm font-bold text-slate-600" for="restSeconds">休息秒数</label>
             <NInputNumber
               id="restSeconds"
@@ -1141,7 +1246,7 @@ onBeforeUnmount(() => {
 
             <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2">
               <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-                休息 {{ log.plan.restSeconds }} 秒
+                准备 {{ log.plan.startCountdownSeconds }} 秒 · 休息 {{ log.plan.restSeconds }} 秒
               </p>
               <ol class="mt-2 space-y-1">
                 <li
