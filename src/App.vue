@@ -77,6 +77,7 @@ interface StoredState {
   history?: WorkoutSessionLog[]
   voiceId?: string
   themeMode?: ThemeMode
+  countdownPromptStartSeconds?: number
   startCountdownSeconds?: number
   restSeconds?: number
   routine?: Activity[]
@@ -197,6 +198,12 @@ function normalizeStartCountdown(value: unknown, fallback = 5) {
   return Math.max(0, Math.min(60, Math.round(seconds)))
 }
 
+function normalizeCountdownPromptStart(value: unknown, fallback = 3) {
+  const numeric = Number(value)
+  const seconds = Number.isFinite(numeric) ? numeric : fallback
+  return Math.max(1, Math.min(30, Math.round(seconds)))
+}
+
 function normalizeThemeMode(value: unknown): ThemeMode {
   return value === 'light' || value === 'dark' || value === 'system' ? value : 'system'
 }
@@ -272,7 +279,14 @@ function loadState() {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) {
       const defaultPlan = createPlan('基础循环', defaultRoutine)
-      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '', themeMode: 'system' }
+      return {
+        activePlanId: defaultPlan.id,
+        plans: [defaultPlan],
+        history: [],
+        voiceId: '',
+        themeMode: 'system',
+        countdownPromptStartSeconds: 3,
+      }
     }
 
     const parsed = JSON.parse(saved) as StoredState
@@ -297,10 +311,18 @@ function loadState() {
       history: normalizeHistory(parsed.history),
       voiceId: String(parsed.voiceId || ''),
       themeMode: normalizeThemeMode(parsed.themeMode),
+      countdownPromptStartSeconds: normalizeCountdownPromptStart(parsed.countdownPromptStartSeconds),
     }
   } catch {
     const defaultPlan = createPlan('基础循环', defaultRoutine)
-    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '', themeMode: 'system' }
+    return {
+      activePlanId: defaultPlan.id,
+      plans: [defaultPlan],
+      history: [],
+      voiceId: '',
+      themeMode: 'system',
+      countdownPromptStartSeconds: 3,
+    }
   }
 }
 
@@ -310,6 +332,7 @@ const plans = ref<WorkoutPlan[]>(savedState.plans)
 const workoutHistory = ref<WorkoutSessionLog[]>(savedState.history)
 const selectedVoiceId = ref(savedState.voiceId)
 const themeMode = ref<ThemeMode>(normalizeThemeMode(savedState.themeMode))
+const countdownPromptStartSeconds = ref(normalizeCountdownPromptStart(savedState.countdownPromptStartSeconds))
 const availableVoices = ref<SpeechSynthesisVoice[]>([])
 const phase = ref<SessionPhase>('idle')
 const currentPage = ref<AppPage>(getPageFromHash())
@@ -470,7 +493,7 @@ const timerLabel = computed(() => {
 const isDraggingActivity = computed(() => draggingActivityId.value !== null)
 
 watch(
-  [activePlanId, plans, workoutHistory, selectedVoiceId, themeMode],
+  [activePlanId, plans, workoutHistory, selectedVoiceId, themeMode, countdownPromptStartSeconds],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -480,6 +503,7 @@ watch(
         history: workoutHistory.value,
         voiceId: selectedVoiceId.value,
         themeMode: themeMode.value,
+        countdownPromptStartSeconds: countdownPromptStartSeconds.value,
         startCountdownSeconds: startCountdownSeconds.value,
       }),
     )
@@ -550,6 +574,10 @@ function getRestTransition(index: number, setIndex: number) {
     label: isSetRest ? '组间休息' : '动作间休息',
     seconds: isSetRest ? activity.setRestSeconds : activity.nextRestSeconds,
   }
+}
+
+function shouldSpeakCountdownNumber(value: number) {
+  return value <= countdownPromptStartSeconds.value && value > 1
 }
 
 function formatDateTime(value: string) {
@@ -721,7 +749,7 @@ function startTimer() {
     if (isCountdownTransitionPending.value) return
 
     if (phase.value === 'countdown') {
-      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
+      if (shouldSpeakCountdownNumber(secondsLeft.value)) {
         speak(String(secondsLeft.value))
       }
 
@@ -736,7 +764,7 @@ function startTimer() {
     }
 
     if (phase.value === 'rest') {
-      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
+      if (shouldSpeakCountdownNumber(secondsLeft.value)) {
         speak(String(secondsLeft.value))
       }
 
@@ -751,7 +779,7 @@ function startTimer() {
     }
 
     if (phase.value === 'action' && currentActivity.value?.mode === 'time') {
-      if (secondsLeft.value <= 3 && secondsLeft.value > 1) {
+      if (shouldSpeakCountdownNumber(secondsLeft.value)) {
         speak(String(secondsLeft.value))
       }
 
@@ -1620,6 +1648,25 @@ onBeforeUnmount(() => {
               :options="voiceOptions"
               :disabled="!voiceEnabled"
             />
+          </div>
+
+          <div class="mt-4">
+            <label class="block text-sm font-bold text-slate-600 dark:text-slate-300" for="countdownPromptStartSeconds">倒数提示起始秒数</label>
+            <NInputNumber
+              id="countdownPromptStartSeconds"
+              v-no-stepper-focus
+              v-model:value="countdownPromptStartSeconds"
+              class="mt-2 w-full"
+              :min="1"
+              :max="30"
+              :step="1"
+              :precision="0"
+              button-placement="both"
+              @update:value="countdownPromptStartSeconds = normalizeCountdownPromptStart($event)"
+            />
+            <p class="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
+              例如设为 5 时，会在结束前从 5 开始提示。
+            </p>
           </div>
 
           <div class="mt-4">
