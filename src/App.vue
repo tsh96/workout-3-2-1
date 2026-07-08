@@ -36,7 +36,10 @@ interface Activity {
   id: string
   name: string
   mode: ActivityMode
+  sets: number
   target: number
+  setRestSeconds: number
+  nextRestSeconds: number
 }
 
 interface WorkoutPlan {
@@ -82,10 +85,10 @@ const modeOptions = [
 ]
 
 const defaultRoutine: Activity[] = [
-  { id: 'squat', name: '深蹲', mode: 'reps', target: 15 },
-  { id: 'plank', name: '平板支撑', mode: 'time', target: 45 },
-  { id: 'pushup', name: '俯卧撑', mode: 'reps', target: 12 },
-  { id: 'mountain', name: '登山跑', mode: 'time', target: 30 },
+  { id: 'squat', name: '深蹲', mode: 'reps', sets: 1, target: 15, setRestSeconds: 30, nextRestSeconds: 30 },
+  { id: 'plank', name: '平板支撑', mode: 'time', sets: 1, target: 45, setRestSeconds: 30, nextRestSeconds: 30 },
+  { id: 'pushup', name: '俯卧撑', mode: 'reps', sets: 1, target: 12, setRestSeconds: 30, nextRestSeconds: 30 },
+  { id: 'mountain', name: '登山跑', mode: 'time', sets: 1, target: 30, setRestSeconds: 30, nextRestSeconds: 30 },
 ]
 
 function createId(prefix: string) {
@@ -97,21 +100,42 @@ function cloneActivities(activities: Activity[]) {
   return activities.map((activity) => ({ ...activity }))
 }
 
-function normalizeActivity(activity: Partial<Activity>, index: number): Activity {
+function normalizeSets(value: unknown) {
+  return Math.max(1, Math.min(99, Math.round(Number(value) || 1)))
+}
+
+function normalizeRestDuration(value: unknown, fallback = 30) {
+  const numeric = Number(value)
+  const seconds = Number.isFinite(numeric) ? numeric : fallback
+  return Math.max(0, Math.min(600, Math.round(seconds)))
+}
+
+function normalizeActivity(activity: Partial<Activity>, index: number, fallbackRestSeconds = 30): Activity {
   const mode: ActivityMode = activity.mode === 'time' ? 'time' : 'reps'
 
   return {
     id: activity.id || createId(`activity-${index + 1}`),
     name: String(activity.name || `动作 ${index + 1}`),
     mode,
+    sets: normalizeSets(activity.sets),
     target: Math.max(1, Number(activity.target) || 1),
+    setRestSeconds: normalizeRestDuration(activity.setRestSeconds, fallbackRestSeconds),
+    nextRestSeconds: normalizeRestDuration(activity.nextRestSeconds, fallbackRestSeconds),
   }
 }
 
-function normalizeRoutine(routine: unknown): Activity[] {
-  if (!Array.isArray(routine) || routine.length === 0) return cloneActivities(defaultRoutine)
+function normalizeRoutine(routine: unknown, fallbackRestSeconds = 30): Activity[] {
+  if (!Array.isArray(routine) || routine.length === 0) {
+    return defaultRoutine.map((activity) => ({
+      ...activity,
+      setRestSeconds: fallbackRestSeconds,
+      nextRestSeconds: fallbackRestSeconds,
+    }))
+  }
 
-  return routine.map((activity, index) => normalizeActivity(activity as Partial<Activity>, index))
+  return routine.map((activity, index) =>
+    normalizeActivity(activity as Partial<Activity>, index, fallbackRestSeconds),
+  )
 }
 
 function normalizeStartCountdown(value: unknown, fallback = 5) {
@@ -126,22 +150,25 @@ function createPlan(
   routine: Activity[] = defaultRoutine,
   startCountdownSeconds = 5,
 ): WorkoutPlan {
+  const normalizedRestSeconds = normalizeRestDuration(restSeconds, 30)
   return {
     id: createId('plan'),
     name,
     startCountdownSeconds: normalizeStartCountdown(startCountdownSeconds),
-    restSeconds: Math.max(3, Number(restSeconds) || 30),
-    routine: cloneActivities(routine),
+    restSeconds: normalizedRestSeconds,
+    routine: normalizeRoutine(routine, normalizedRestSeconds),
   }
 }
 
 function normalizePlan(plan: Partial<WorkoutPlan>, index: number): WorkoutPlan {
+  const restSeconds = normalizeRestDuration(plan.restSeconds, 30)
+
   return {
     id: plan.id || createId(`plan-${index + 1}`),
     name: String(plan.name || `计划 ${index + 1}`),
     startCountdownSeconds: normalizeStartCountdown(plan.startCountdownSeconds),
-    restSeconds: Math.max(3, Number(plan.restSeconds) || 30),
-    routine: normalizeRoutine(plan.routine),
+    restSeconds,
+    routine: normalizeRoutine(plan.routine, restSeconds),
   }
 }
 
@@ -163,6 +190,7 @@ function normalizeHistory(history: unknown): WorkoutSessionLog[] {
       const status: WorkoutLogStatus =
         log.status === 'completed' || log.status === 'stopped' ? log.status : 'started'
       const snapshot = log.plan as Partial<WorkoutPlanSnapshot> | undefined
+      const restSeconds = normalizeRestDuration(snapshot?.restSeconds, 30)
 
       const normalizedLog: WorkoutSessionLog = {
         id: log.id || createId(`session-${index + 1}`),
@@ -173,8 +201,8 @@ function normalizeHistory(history: unknown): WorkoutSessionLog[] {
         plan: {
           name: String(snapshot?.name || log.planName || '未命名计划'),
           startCountdownSeconds: normalizeStartCountdown(snapshot?.startCountdownSeconds, 0),
-          restSeconds: Math.max(3, Number(snapshot?.restSeconds) || 30),
-          routine: normalizeRoutine(snapshot?.routine),
+          restSeconds,
+          routine: normalizeRoutine(snapshot?.routine, restSeconds),
         },
       }
 
@@ -231,7 +259,10 @@ const phase = ref<SessionPhase>('idle')
 const currentPage = ref<AppPage>(getPageFromHash())
 const isRunning = ref(false)
 const currentIndex = ref(0)
+const currentSetIndex = ref(0)
 const secondsLeft = ref(0)
+const currentRestSeconds = ref(0)
+const currentRestLabel = ref('休息')
 const voiceEnabled = ref(true)
 const draggingActivityId = ref<string | null>(null)
 const dragOverActivityId = ref<string | null>(null)
@@ -282,7 +313,7 @@ const restSeconds = computed({
   get: () => currentPlan.value?.restSeconds ?? 30,
   set: (value: number | null) => {
     if (!currentPlan.value) return
-    currentPlan.value.restSeconds = Math.max(3, Number(value) || 30)
+    currentPlan.value.restSeconds = normalizeRestDuration(value)
   },
 })
 const routine = computed({
@@ -293,15 +324,15 @@ const routine = computed({
   },
 })
 const currentActivity = computed(() => routine.value[currentIndex.value])
-const nextActivity = computed(() => {
-  if (phase.value === 'countdown') return routine.value[0]
-  if (phase.value === 'idle') return routine.value[1]
-  return routine.value[currentIndex.value + 1]
+const currentSetNumber = computed(() => currentSetIndex.value + 1)
+const currentSetTotal = computed(() => currentActivity.value?.sets ?? 1)
+const currentProgressText = computed(() => {
+  if (routine.value.length === 0) return '0/0'
+  return `${currentIndex.value + 1}/${routine.value.length} · ${currentSetNumber.value}/${currentSetTotal.value} 组`
 })
-
 const totalForPhase = computed(() => {
   if (phase.value === 'countdown') return startCountdownSeconds.value
-  if (phase.value === 'rest') return restSeconds.value
+  if (phase.value === 'rest') return currentRestSeconds.value
   if (phase.value === 'action' && currentActivity.value?.mode === 'time') return currentActivity.value.target
   return 0
 })
@@ -336,17 +367,22 @@ const statusTitle = computed(() => {
 const currentText = computed(() => {
   if (phase.value === 'countdown') {
     const activity = routine.value[0]
-    return activity ? `即将开始 ${activity.name} · ${formatActionTarget(activity)}` : '暂无动作'
+    return activity ? `即将开始 ${activity.name} · ${formatSetTarget(activity, 0)}` : '暂无动作'
   }
-  if (phase.value === 'rest') return `休息 ${restSeconds.value} 秒`
+  if (phase.value === 'rest') return `${currentRestLabel.value} ${currentRestSeconds.value} 秒`
   if (phase.value === 'done') return '已完成'
   const activity = phase.value === 'idle' ? routine.value[0] : currentActivity.value
-  return activity ? `${activity.name} · ${formatActionTarget(activity)}` : '暂无动作'
+  return activity ? `${activity.name} · ${formatSetTarget(activity, phase.value === 'idle' ? 0 : currentSetIndex.value)}` : '暂无动作'
 })
 
 const nextText = computed(() => {
-  const activity = nextActivity.value
-  return activity ? `${activity.name} · ${formatActionTarget(activity)}` : '没有下一个动作'
+  const step =
+    phase.value === 'countdown'
+      ? { activity: routine.value[0], setIndex: 0 }
+      : phase.value === 'idle'
+        ? getNextWorkoutStep(0, 0)
+        : getNextWorkoutStep(currentIndex.value, currentSetIndex.value)
+  return step?.activity ? `${step.activity.name} · ${formatSetTarget(step.activity, step.setIndex)}` : '没有下一个动作'
 })
 
 const primaryLabel = computed(() => {
@@ -399,6 +435,48 @@ function getPageFromHash(): AppPage {
 
 function formatActionTarget(activity: Activity) {
   return `${activity.target} ${activity.mode === 'reps' ? '次' : '秒'}`
+}
+
+function formatSetTarget(activity: Activity, setIndex: number) {
+  const setText = activity.sets > 1 ? `第 ${setIndex + 1}/${activity.sets} 组` : '第 1 组'
+  return `${setText} · ${formatActionTarget(activity)}`
+}
+
+function formatActivityTarget(activity: Activity) {
+  return `${activity.sets} 组 × ${formatActionTarget(activity)}`
+}
+
+function formatActivityRest(activity: Activity, isLastActivity: boolean) {
+  const nextRestText = isLastActivity ? '动作间 -' : `动作间 ${activity.nextRestSeconds} 秒`
+  return `组间 ${activity.setRestSeconds} 秒 · ${nextRestText}`
+}
+
+function getNextWorkoutStep(index: number, setIndex: number) {
+  const activity = routine.value[index]
+  if (!activity) return null
+
+  if (setIndex + 1 < activity.sets) {
+    return { activity, index, setIndex: setIndex + 1 }
+  }
+
+  const nextIndex = index + 1
+  const nextActivityInRoutine = routine.value[nextIndex]
+  if (!nextActivityInRoutine) return null
+
+  return { activity: nextActivityInRoutine, index: nextIndex, setIndex: 0 }
+}
+
+function getRestTransition(index: number, setIndex: number) {
+  const activity = routine.value[index]
+  const nextStep = getNextWorkoutStep(index, setIndex)
+  if (!activity || !nextStep) return null
+
+  const isSetRest = nextStep.index === index
+  return {
+    nextStep,
+    label: isSetRest ? '组间休息' : '动作间休息',
+    seconds: isSetRest ? activity.setRestSeconds : activity.nextRestSeconds,
+  }
 }
 
 function formatDateTime(value: string) {
@@ -577,9 +655,9 @@ function startTimer() {
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
       } else if (secondsLeft.value === 1) {
-        finishAfterFinalCountdown(() => startAction(0))
+        finishAfterFinalCountdown(() => startAction(0, 0))
       } else {
-        startAction(0)
+        startAction(0, 0)
       }
       return
     }
@@ -592,9 +670,9 @@ function startTimer() {
       if (secondsLeft.value > 1) {
         secondsLeft.value -= 1
       } else if (secondsLeft.value === 1) {
-        finishAfterFinalCountdown(() => startAction(currentIndex.value + 1))
+        finishAfterFinalCountdown(startNextStep)
       } else {
-        startAction(currentIndex.value + 1)
+        startNextStep()
       }
       return
     }
@@ -638,7 +716,7 @@ function beginSession() {
   if (startCountdownSeconds.value > 0) {
     startStartCountdown()
   } else {
-    startAction(0)
+    startAction(0, 0)
   }
   startTimer()
 }
@@ -652,12 +730,13 @@ function startStartCountdown() {
   }
 
   currentIndex.value = 0
+  currentSetIndex.value = 0
   phase.value = 'countdown'
   secondsLeft.value = startCountdownSeconds.value
   speak(`准备，${startCountdownSeconds.value}秒后开始，第一个动作是${firstActivity.name}`)
 }
 
-function startAction(index: number) {
+function startAction(index: number, setIndex = 0) {
   clearCountdownTransition()
   const activity = routine.value[index]
   if (!activity) {
@@ -666,22 +745,41 @@ function startAction(index: number) {
   }
 
   currentIndex.value = index
+  currentSetIndex.value = Math.max(0, Math.min(activity.sets - 1, setIndex))
   phase.value = 'action'
   secondsLeft.value = activity.mode === 'time' ? activity.target : 0
-  speak(`${activity.name}，${formatActionTarget(activity)}`)
+  speak(`${activity.name}，第${currentSetIndex.value + 1}组，${formatActionTarget(activity)}`)
 }
 
 function startRest() {
   clearCountdownTransition()
-  const upcoming = routine.value[currentIndex.value + 1]
-  if (!upcoming) {
+  const transition = getRestTransition(currentIndex.value, currentSetIndex.value)
+  if (!transition) {
     completeSession()
     return
   }
 
+  if (transition.seconds <= 0) {
+    startAction(transition.nextStep.index, transition.nextStep.setIndex)
+    return
+  }
+
   phase.value = 'rest'
-  secondsLeft.value = restSeconds.value
-  speak(`开始休息${restSeconds.value}秒，下个动作是${upcoming.name}，${formatActionTarget(upcoming)}`)
+  currentRestSeconds.value = transition.seconds
+  currentRestLabel.value = transition.label
+  secondsLeft.value = transition.seconds
+  speak(
+    `${transition.label}${transition.seconds}秒，下个动作是${transition.nextStep.activity.name}，第${transition.nextStep.setIndex + 1}组，${formatActionTarget(transition.nextStep.activity)}`,
+  )
+}
+
+function startNextStep() {
+  const nextStep = getNextWorkoutStep(currentIndex.value, currentSetIndex.value)
+  if (nextStep) {
+    startAction(nextStep.index, nextStep.setIndex)
+  } else {
+    completeSession()
+  }
 }
 
 function finishAction() {
@@ -690,7 +788,7 @@ function finishAction() {
 
 function skipCurrent() {
   if (phase.value === 'countdown') {
-    startAction(0)
+    startAction(0, 0)
     return
   }
 
@@ -700,7 +798,7 @@ function skipCurrent() {
   }
 
   if (phase.value === 'rest') {
-    startAction(currentIndex.value + 1)
+    startNextStep()
   }
 }
 
@@ -710,7 +808,10 @@ function resetSession() {
   isRunning.value = false
   phase.value = 'idle'
   currentIndex.value = 0
+  currentSetIndex.value = 0
   secondsLeft.value = 0
+  currentRestSeconds.value = 0
+  currentRestLabel.value = '休息'
   if (speechTimerId) window.clearTimeout(speechTimerId)
   if ('speechSynthesis' in window) window.speechSynthesis.cancel()
 }
@@ -793,7 +894,10 @@ function addActivity() {
       id: createId('activity'),
       name: '新动作',
       mode: 'reps',
+      sets: 1,
       target: 10,
+      setRestSeconds: restSeconds.value,
+      nextRestSeconds: restSeconds.value,
     },
   ]
 }
@@ -966,7 +1070,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="pb-1 text-right text-xs font-bold text-slate-300">
-              <p>{{ currentIndex + 1 }}/{{ routine.length }}</p>
+              <p>{{ currentProgressText }}</p>
               <p class="mt-1">{{ sessionStateLabel }}</p>
             </div>
           </div>
@@ -1117,16 +1221,18 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="rounded-lg border border-slate-200 bg-white p-3">
-            <label class="text-sm font-bold text-slate-600" for="restSeconds">休息秒数</label>
+            <label class="text-sm font-bold text-slate-600" for="restSeconds">默认休息秒数</label>
             <NInputNumber
               id="restSeconds"
               v-model:value="restSeconds"
               class="mt-2 w-full"
-              :min="3"
+              :min="0"
               :max="600"
               :step="5"
+              :precision="0"
               button-placement="both"
               :disabled="!canEditPlan"
+              @update:value="restSeconds = normalizeRestDuration($event)"
             />
           </div>
 
@@ -1174,20 +1280,70 @@ onBeforeUnmount(() => {
                 </NButton>
               </div>
 
-              <div class="mt-2 grid grid-cols-[minmax(96px,1fr)_minmax(112px,1fr)] gap-2">
-                <NSelect
-                  v-model:value="activity.mode"
-                  :options="modeOptions"
-                  :disabled="!canEditPlan || isDraggingActivity"
-                />
-                <NInputNumber
-                  v-model:value="activity.target"
-                  :min="1"
-                  :max="999"
-                  :step="activity.mode === 'reps' ? 1 : 5"
-                  button-placement="both"
-                  :disabled="!canEditPlan || isDraggingActivity"
-                />
+              <div class="mt-2 grid grid-cols-[minmax(82px,0.85fr)_minmax(88px,1fr)_minmax(104px,1.12fr)] gap-2">
+                <div>
+                  <label class="mb-1 block text-xs font-bold text-slate-500">模式</label>
+                  <NSelect
+                    v-model:value="activity.mode"
+                    :options="modeOptions"
+                    :disabled="!canEditPlan || isDraggingActivity"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-xs font-bold text-slate-500">组数</label>
+                  <NInputNumber
+                    v-model:value="activity.sets"
+                    :min="1"
+                    :max="99"
+                    :step="1"
+                    :precision="0"
+                    button-placement="both"
+                    :disabled="!canEditPlan || isDraggingActivity"
+                    @update:value="activity.sets = normalizeSets($event)"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-xs font-bold text-slate-500">
+                    {{ activity.mode === 'reps' ? '每组次数' : '每组秒数' }}
+                  </label>
+                  <NInputNumber
+                    v-model:value="activity.target"
+                    :min="1"
+                    :max="999"
+                    :step="activity.mode === 'reps' ? 1 : 5"
+                    button-placement="both"
+                    :disabled="!canEditPlan || isDraggingActivity"
+                  />
+                </div>
+              </div>
+
+              <div class="mt-2 grid grid-cols-2 gap-2">
+                <div>
+                  <label class="mb-1 block text-xs font-bold text-slate-500">组间休息</label>
+                  <NInputNumber
+                    v-model:value="activity.setRestSeconds"
+                    :min="0"
+                    :max="600"
+                    :step="5"
+                    :precision="0"
+                    button-placement="both"
+                    :disabled="!canEditPlan || isDraggingActivity"
+                    @update:value="activity.setRestSeconds = normalizeRestDuration($event)"
+                  />
+                </div>
+                <div>
+                  <label class="mb-1 block text-xs font-bold text-slate-500">动作间休息</label>
+                  <NInputNumber
+                    v-model:value="activity.nextRestSeconds"
+                    :min="0"
+                    :max="600"
+                    :step="5"
+                    :precision="0"
+                    button-placement="both"
+                    :disabled="!canEditPlan || isDraggingActivity || index === routine.length - 1"
+                    @update:value="activity.nextRestSeconds = normalizeRestDuration($event)"
+                  />
+                </div>
               </div>
             </article>
           </div>
@@ -1246,16 +1402,19 @@ onBeforeUnmount(() => {
 
             <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2">
               <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-                准备 {{ log.plan.startCountdownSeconds }} 秒 · 休息 {{ log.plan.restSeconds }} 秒
+                准备 {{ log.plan.startCountdownSeconds }} 秒 · 默认休息 {{ log.plan.restSeconds }} 秒
               </p>
               <ol class="mt-2 space-y-1">
                 <li
                   v-for="(activity, index) in log.plan.routine"
                   :key="`${log.id}-${activity.id}`"
-                  class="flex items-center justify-between gap-3 text-sm font-bold"
+                  class="flex items-start justify-between gap-3 text-sm font-bold"
                 >
                   <span class="min-w-0 truncate text-slate-800">{{ index + 1 }}. {{ activity.name }}</span>
-                  <span class="shrink-0 text-slate-500">{{ formatActionTarget(activity) }}</span>
+                  <span class="shrink-0 text-right text-slate-500">
+                    <span class="block">{{ formatActivityTarget(activity) }}</span>
+                    <span class="block text-xs">{{ formatActivityRest(activity, index === log.plan.routine.length - 1) }}</span>
+                  </span>
                 </li>
               </ol>
             </div>
