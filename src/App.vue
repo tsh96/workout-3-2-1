@@ -329,6 +329,7 @@ const planNameDraft = ref('')
 const editingPlanId = ref<string | null>(null)
 const isDeleteConfirmOpen = ref(false)
 const pendingDeleteTarget = ref<DeleteTarget | null>(null)
+const isSystemSettingsModalOpen = ref(false)
 const systemPrefersDark = ref(false)
 
 let timerId: number | undefined
@@ -1302,31 +1303,12 @@ onBeforeUnmount(() => {
 
           <div class="flex items-center justify-between">
             <h2 class="text-base font-black">训练计划</h2>
-            <div class="flex items-center gap-2 text-sm font-bold text-slate-600 dark:text-slate-300">
-              <span>语音</span>
-              <NSwitch v-model:value="voiceEnabled" size="small" />
-            </div>
-          </div>
-
-          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
-            <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="themeMode">外观</label>
-            <NSelect
-              id="themeMode"
-              v-model:value="themeMode"
-              class="mt-2"
-              :options="themeModeOptions"
-            />
-          </div>
-
-          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
-            <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="voiceSelect">语音声音</label>
-            <NSelect
-              id="voiceSelect"
-              v-model:value="selectedVoiceId"
-              class="mt-2"
-              :options="voiceOptions"
-              :disabled="!voiceEnabled"
-            />
+            <NButton secondary size="small" @click="isSystemSettingsModalOpen = true">
+              <template #icon>
+                <Settings :size="16" />
+              </template>
+              系统设置
+            </NButton>
           </div>
 
           <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
@@ -1605,6 +1587,47 @@ onBeforeUnmount(() => {
         </footer>
       </div>
     </main>
+
+    <NModal v-model:show="isSystemSettingsModalOpen" :mask-closable="false">
+      <div class="fixed inset-0 flex items-center justify-center p-4">
+        <section class="w-full max-w-[360px] rounded-lg bg-white p-4 shadow-soft transition-colors dark:bg-slate-900">
+          <h2 class="text-lg font-black text-slate-950 dark:text-slate-100">系统设置</h2>
+
+          <div class="mt-4 flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm font-bold text-slate-700 dark:text-slate-200">语音</p>
+              <p class="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">训练时播放语音提示</p>
+            </div>
+            <NSwitch v-model:value="voiceEnabled" />
+          </div>
+
+          <div class="mt-4">
+            <label class="block text-sm font-bold text-slate-600 dark:text-slate-300" for="themeMode">外观</label>
+            <NSelect
+              id="themeMode"
+              v-model:value="themeMode"
+              class="mt-2"
+              :options="themeModeOptions"
+            />
+          </div>
+
+          <div class="mt-4">
+            <label class="block text-sm font-bold text-slate-600 dark:text-slate-300" for="voiceSelect">语音声音</label>
+            <NSelect
+              id="voiceSelect"
+              v-model:value="selectedVoiceId"
+              class="mt-2"
+              :options="voiceOptions"
+              :disabled="!voiceEnabled"
+            />
+          </div>
+
+          <div class="mt-4">
+            <NButton block type="primary" @click="isSystemSettingsModalOpen = false">完成</NButton>
+          </div>
+        </section>
+      </div>
+    </NModal>
 
     <NModal v-model:show="isPlanNameModalOpen" :mask-closable="false">
       <div class="fixed inset-0 flex items-center justify-center p-4">
