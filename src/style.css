@@ -11,10 +11,16 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:root.dark {
+  color: #f8fafc;
+  background: #020617;
+}
+
 body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
+  background: inherit;
 }
 
 button,

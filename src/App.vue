@@ -6,6 +6,7 @@ import {
   GripVertical,
   History,
   Pause,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
@@ -20,10 +21,12 @@ import {
   NConfigProvider,
   NInput,
   NInputNumber,
+  NModal,
   NProgress,
   NSelect,
   NSwitch,
   NTooltip,
+  darkTheme,
 } from 'naive-ui'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ObjectDirective } from 'vue'
@@ -32,6 +35,8 @@ type ActivityMode = 'reps' | 'time'
 type AppPage = 'workout' | 'settings' | 'history'
 type SessionPhase = 'idle' | 'countdown' | 'action' | 'rest' | 'done'
 type WorkoutLogStatus = 'started' | 'completed' | 'stopped'
+type DeleteTargetKind = 'plan' | 'activity' | 'history'
+type ThemeMode = 'system' | 'light' | 'dark'
 
 interface Activity {
   id: string
@@ -47,14 +52,12 @@ interface WorkoutPlan {
   id: string
   name: string
   startCountdownSeconds: number
-  restSeconds: number
   routine: Activity[]
 }
 
 interface WorkoutPlanSnapshot {
   name: string
   startCountdownSeconds: number
-  restSeconds: number
   routine: Activity[]
 }
 
@@ -73,12 +76,28 @@ interface StoredState {
   plans?: WorkoutPlan[]
   history?: WorkoutSessionLog[]
   voiceId?: string
+  themeMode?: ThemeMode
   startCountdownSeconds?: number
   restSeconds?: number
   routine?: Activity[]
 }
 
+interface DeleteTarget {
+  kind: DeleteTargetKind
+  id: string
+  title: string
+  description: string
+  confirmLabel: string
+}
+
 const STORAGE_KEY = 'workout-3-2-1-state'
+const DEFAULT_REST_SECONDS = 30
+
+const themeModeOptions = [
+  { label: '跟随系统', value: 'system' },
+  { label: '浅色', value: 'light' },
+  { label: '深色', value: 'dark' },
+]
 
 const modeOptions = [
   { label: '计次', value: 'reps' },
@@ -178,31 +197,31 @@ function normalizeStartCountdown(value: unknown, fallback = 5) {
   return Math.max(0, Math.min(60, Math.round(seconds)))
 }
 
+function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system'
+}
+
 function createPlan(
   name: string,
-  restSeconds = 30,
   routine: Activity[] = defaultRoutine,
   startCountdownSeconds = 5,
 ): WorkoutPlan {
-  const normalizedRestSeconds = normalizeRestDuration(restSeconds, 30)
   return {
     id: createId('plan'),
     name,
     startCountdownSeconds: normalizeStartCountdown(startCountdownSeconds),
-    restSeconds: normalizedRestSeconds,
-    routine: normalizeRoutine(routine, normalizedRestSeconds),
+    routine: normalizeRoutine(routine, DEFAULT_REST_SECONDS),
   }
 }
 
 function normalizePlan(plan: Partial<WorkoutPlan>, index: number): WorkoutPlan {
-  const restSeconds = normalizeRestDuration(plan.restSeconds, 30)
+  const legacyRestSeconds = normalizeRestDuration((plan as { restSeconds?: unknown }).restSeconds, DEFAULT_REST_SECONDS)
 
   return {
     id: plan.id || createId(`plan-${index + 1}`),
     name: String(plan.name || `计划 ${index + 1}`),
     startCountdownSeconds: normalizeStartCountdown(plan.startCountdownSeconds),
-    restSeconds,
-    routine: normalizeRoutine(plan.routine, restSeconds),
+    routine: normalizeRoutine(plan.routine, legacyRestSeconds),
   }
 }
 
@@ -224,7 +243,10 @@ function normalizeHistory(history: unknown): WorkoutSessionLog[] {
       const status: WorkoutLogStatus =
         log.status === 'completed' || log.status === 'stopped' ? log.status : 'started'
       const snapshot = log.plan as Partial<WorkoutPlanSnapshot> | undefined
-      const restSeconds = normalizeRestDuration(snapshot?.restSeconds, 30)
+      const legacyRestSeconds = normalizeRestDuration(
+        (snapshot as { restSeconds?: unknown } | undefined)?.restSeconds,
+        DEFAULT_REST_SECONDS,
+      )
 
       const normalizedLog: WorkoutSessionLog = {
         id: log.id || createId(`session-${index + 1}`),
@@ -235,8 +257,7 @@ function normalizeHistory(history: unknown): WorkoutSessionLog[] {
         plan: {
           name: String(snapshot?.name || log.planName || '未命名计划'),
           startCountdownSeconds: normalizeStartCountdown(snapshot?.startCountdownSeconds, 0),
-          restSeconds,
-          routine: normalizeRoutine(snapshot?.routine, restSeconds),
+          routine: normalizeRoutine(snapshot?.routine, legacyRestSeconds),
         },
       }
 
@@ -250,8 +271,8 @@ function loadState() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) {
-      const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
-      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '' }
+      const defaultPlan = createPlan('基础循环', defaultRoutine)
+      return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '', themeMode: 'system' }
     }
 
     const parsed = JSON.parse(saved) as StoredState
@@ -261,8 +282,7 @@ function loadState() {
         : [
             createPlan(
               '基础循环',
-              parsed.restSeconds,
-              normalizeRoutine(parsed.routine),
+              normalizeRoutine(parsed.routine, normalizeRestDuration(parsed.restSeconds, DEFAULT_REST_SECONDS)),
               parsed.startCountdownSeconds,
             ),
           ]
@@ -276,10 +296,11 @@ function loadState() {
       plans,
       history: normalizeHistory(parsed.history),
       voiceId: String(parsed.voiceId || ''),
+      themeMode: normalizeThemeMode(parsed.themeMode),
     }
   } catch {
-    const defaultPlan = createPlan('基础循环', 30, defaultRoutine)
-    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '' }
+    const defaultPlan = createPlan('基础循环', defaultRoutine)
+    return { activePlanId: defaultPlan.id, plans: [defaultPlan], history: [], voiceId: '', themeMode: 'system' }
   }
 }
 
@@ -288,6 +309,7 @@ const activePlanId = ref(savedState.activePlanId)
 const plans = ref<WorkoutPlan[]>(savedState.plans)
 const workoutHistory = ref<WorkoutSessionLog[]>(savedState.history)
 const selectedVoiceId = ref(savedState.voiceId)
+const themeMode = ref<ThemeMode>(normalizeThemeMode(savedState.themeMode))
 const availableVoices = ref<SpeechSynthesisVoice[]>([])
 const phase = ref<SessionPhase>('idle')
 const currentPage = ref<AppPage>(getPageFromHash())
@@ -302,10 +324,17 @@ const draggingActivityId = ref<string | null>(null)
 const dragOverActivityId = ref<string | null>(null)
 const activeWorkoutLogId = ref<string | null>(null)
 const isCountdownTransitionPending = ref(false)
+const isPlanNameModalOpen = ref(false)
+const planNameDraft = ref('')
+const editingPlanId = ref<string | null>(null)
+const isDeleteConfirmOpen = ref(false)
+const pendingDeleteTarget = ref<DeleteTarget | null>(null)
+const systemPrefersDark = ref(false)
 
 let timerId: number | undefined
 let speechTimerId: number | undefined
 let countdownTransitionTimerId: number | undefined
+let colorSchemeMediaQuery: MediaQueryList | undefined
 
 const themeOverrides = {
   common: {
@@ -326,6 +355,12 @@ const themeOverrides = {
 
 const currentPlan = computed(() => plans.value.find((plan) => plan.id === activePlanId.value) ?? plans.value[0])
 const planOptions = computed(() => plans.value.map((plan) => ({ label: plan.name || '未命名计划', value: plan.id })))
+const resolvedThemeMode = computed<'light' | 'dark'>(() =>
+  themeMode.value === 'system' ? (systemPrefersDark.value ? 'dark' : 'light') : themeMode.value,
+)
+const isDarkTheme = computed(() => resolvedThemeMode.value === 'dark')
+const naiveTheme = computed(() => (isDarkTheme.value ? darkTheme : null))
+const progressRailColor = computed(() => (isDarkTheme.value ? '#164e4a' : '#d7e8e3'))
 const voiceOptions = computed(() => [
   { label: '自动选择', value: '' },
   ...availableVoices.value
@@ -341,13 +376,6 @@ const startCountdownSeconds = computed({
   set: (value: number | null) => {
     if (!currentPlan.value) return
     currentPlan.value.startCountdownSeconds = normalizeStartCountdown(value)
-  },
-})
-const restSeconds = computed({
-  get: () => currentPlan.value?.restSeconds ?? 30,
-  set: (value: number | null) => {
-    if (!currentPlan.value) return
-    currentPlan.value.restSeconds = normalizeRestDuration(value)
   },
 })
 const routine = computed({
@@ -441,7 +469,7 @@ const timerLabel = computed(() => {
 const isDraggingActivity = computed(() => draggingActivityId.value !== null)
 
 watch(
-  [activePlanId, plans, workoutHistory, selectedVoiceId],
+  [activePlanId, plans, workoutHistory, selectedVoiceId, themeMode],
   () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -450,6 +478,7 @@ watch(
         plans: plans.value,
         history: workoutHistory.value,
         voiceId: selectedVoiceId.value,
+        themeMode: themeMode.value,
         startCountdownSeconds: startCountdownSeconds.value,
       }),
     )
@@ -460,6 +489,15 @@ watch(
 watch(activePlanId, () => {
   resetSession()
 })
+
+watch(
+  isDarkTheme,
+  (enabled) => {
+    document.documentElement.classList.toggle('dark', enabled)
+    document.documentElement.style.colorScheme = enabled ? 'dark' : 'light'
+  },
+  { immediate: true },
+)
 
 function getPageFromHash(): AppPage {
   if (window.location.hash === '#settings') return 'settings'
@@ -871,7 +909,6 @@ function recordWorkoutStart() {
     plan: {
       name: plan.name || '未命名计划',
       startCountdownSeconds: plan.startCountdownSeconds,
-      restSeconds: plan.restSeconds,
       routine: cloneActivities(plan.routine),
     },
   }
@@ -899,13 +936,40 @@ function addPlan() {
   activePlanId.value = plan.id
 }
 
+function openPlanNameModal() {
+  const plan = currentPlan.value
+  if (!plan || !canEditPlan.value) return
+
+  editingPlanId.value = plan.id
+  planNameDraft.value = plan.name || ''
+  isPlanNameModalOpen.value = true
+}
+
+function closePlanNameModal() {
+  isPlanNameModalOpen.value = false
+  editingPlanId.value = null
+  planNameDraft.value = ''
+}
+
+function savePlanName() {
+  if (!editingPlanId.value) return
+
+  const plan = plans.value.find((entry) => entry.id === editingPlanId.value)
+  if (!plan) {
+    closePlanNameModal()
+    return
+  }
+
+  plan.name = planNameDraft.value.trim() || '未命名计划'
+  closePlanNameModal()
+}
+
 function duplicateCurrentPlan() {
   const plan = currentPlan.value
   if (!plan) return
 
   const duplicatedPlan = createPlan(
     `${plan.name || '未命名计划'} 副本`,
-    plan.restSeconds,
     plan.routine,
     plan.startCountdownSeconds,
   )
@@ -913,11 +977,35 @@ function duplicateCurrentPlan() {
   activePlanId.value = duplicatedPlan.id
 }
 
-function removeCurrentPlan() {
-  if (plans.value.length <= 1 || !currentPlan.value) return
+function openDeleteConfirm(target: DeleteTarget) {
+  pendingDeleteTarget.value = target
+  isDeleteConfirmOpen.value = true
+}
 
-  const currentPlanIndex = plans.value.findIndex((plan) => plan.id === currentPlan.value?.id)
-  plans.value = plans.value.filter((plan) => plan.id !== currentPlan.value?.id)
+function closeDeleteConfirm() {
+  isDeleteConfirmOpen.value = false
+  pendingDeleteTarget.value = null
+}
+
+function requestRemoveCurrentPlan() {
+  if (plans.value.length <= 1 || !currentPlan.value || !canEditPlan.value) return
+
+  openDeleteConfirm({
+    kind: 'plan',
+    id: currentPlan.value.id,
+    title: '删除当前计划？',
+    description: `计划「${currentPlan.value.name || '未命名计划'}」会被永久删除。`,
+    confirmLabel: '删除计划',
+  })
+}
+
+function removePlan(id: string) {
+  if (plans.value.length <= 1) return
+
+  const currentPlanIndex = plans.value.findIndex((plan) => plan.id === id)
+  if (currentPlanIndex === -1) return
+
+  plans.value = plans.value.filter((plan) => plan.id !== id)
   activePlanId.value = plans.value[Math.max(0, currentPlanIndex - 1)]?.id ?? plans.value[0]?.id
 }
 
@@ -930,10 +1018,24 @@ function addActivity() {
       mode: 'reps',
       sets: 1,
       target: 10,
-      setRestSeconds: restSeconds.value,
-      nextRestSeconds: restSeconds.value,
+      setRestSeconds: DEFAULT_REST_SECONDS,
+      nextRestSeconds: DEFAULT_REST_SECONDS,
     },
   ]
+}
+
+function requestRemoveActivity(id: string) {
+  if (routine.value.length <= 1) return
+  const activity = routine.value.find((entry) => entry.id === id)
+  if (!activity) return
+
+  openDeleteConfirm({
+    kind: 'activity',
+    id,
+    title: '删除动作？',
+    description: `动作「${activity.name || '未命名动作'}」会从当前计划中删除。`,
+    confirmLabel: '删除动作',
+  })
 }
 
 function removeActivity(id: string) {
@@ -942,8 +1044,32 @@ function removeActivity(id: string) {
   resetSession()
 }
 
+function requestDeleteHistoryEntry(id: string) {
+  const log = workoutHistory.value.find((entry) => entry.id === id)
+  if (!log) return
+
+  openDeleteConfirm({
+    kind: 'history',
+    id,
+    title: '删除训练记录？',
+    description: `「${log.planName || '未命名计划'}」的这条训练记录会被永久删除。`,
+    confirmLabel: '删除记录',
+  })
+}
+
 function deleteHistoryEntry(id: string) {
   workoutHistory.value = workoutHistory.value.filter((entry) => entry.id !== id)
+}
+
+function confirmDelete() {
+  const target = pendingDeleteTarget.value
+  if (!target) return
+
+  if (target.kind === 'plan') removePlan(target.id)
+  else if (target.kind === 'activity') removeActivity(target.id)
+  else deleteHistoryEntry(target.id)
+
+  closeDeleteConfirm()
 }
 
 function startActivityDrag(event: PointerEvent, activityId: string) {
@@ -999,8 +1125,15 @@ function stopActivityDrag() {
   dragOverActivityId.value = null
 }
 
+function syncSystemThemePreference(event?: MediaQueryListEvent) {
+  systemPrefersDark.value = event?.matches ?? colorSchemeMediaQuery?.matches ?? false
+}
+
 onMounted(() => {
   window.addEventListener('hashchange', syncPageFromHash)
+  colorSchemeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  syncSystemThemePreference()
+  colorSchemeMediaQuery.addEventListener('change', syncSystemThemePreference)
   loadAvailableVoices()
   if ('speechSynthesis' in window) {
     window.speechSynthesis.addEventListener('voiceschanged', loadAvailableVoices)
@@ -1014,18 +1147,19 @@ onBeforeUnmount(() => {
   if ('speechSynthesis' in window) {
     window.speechSynthesis.removeEventListener('voiceschanged', loadAvailableVoices)
   }
+  colorSchemeMediaQuery?.removeEventListener('change', syncSystemThemePreference)
   window.removeEventListener('hashchange', syncPageFromHash)
   stopActivityDrag()
 })
 </script>
 
 <template>
-  <NConfigProvider :theme-overrides="themeOverrides">
-    <main class="min-h-screen bg-[#f7f8f5] text-slate-950">
+  <NConfigProvider :theme="naiveTheme" :theme-overrides="themeOverrides">
+    <main class="min-h-screen bg-[#f7f8f5] text-slate-950 transition-colors dark:bg-slate-950 dark:text-slate-100">
       <div class="mx-auto flex min-h-screen w-full max-w-md flex-col px-4 pb-6 pt-[max(18px,env(safe-area-inset-top))]">
         <header v-if="currentPage === 'workout'" class="flex items-center justify-between gap-3">
           <div class="min-w-0">
-            <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700">Workout 3-2-1</p>
+            <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700 dark:text-teal-300">Workout 3-2-1</p>
             <h1 class="mt-1 truncate text-2xl font-black leading-tight">训练辅助器</h1>
           </div>
 
@@ -1061,7 +1195,7 @@ onBeforeUnmount(() => {
         </header>
 
         <section v-if="currentPage === 'workout'" class="mt-4">
-          <label class="text-sm font-bold text-slate-600" for="activePlan">训练计划</label>
+          <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="activePlan">训练计划</label>
           <NSelect
             id="activePlan"
             v-model:value="activePlanId"
@@ -1071,14 +1205,14 @@ onBeforeUnmount(() => {
           />
         </section>
 
-        <section v-if="currentPage === 'workout'" class="mt-4 rounded-lg border border-teal-900/10 bg-white p-4 shadow-soft">
+        <section v-if="currentPage === 'workout'" class="mt-4 rounded-lg border border-teal-900/10 bg-white p-4 shadow-soft transition-colors dark:border-teal-300/10 dark:bg-slate-900">
           <div class="flex items-start justify-between gap-4">
             <div class="min-w-0">
-              <p class="text-sm font-bold text-teal-700">
+              <p class="text-sm font-bold text-teal-700 dark:text-teal-300">
                 {{ phase === 'countdown' ? '开始准备' : phase === 'rest' ? '当前休息' : '当前动作' }}
               </p>
               <h2 class="mt-1 truncate text-3xl font-black leading-none">{{ statusTitle }}</h2>
-              <p class="mt-3 text-sm font-semibold text-slate-500">{{ currentText }}</p>
+              <p class="mt-3 text-sm font-semibold text-slate-500 dark:text-slate-400">{{ currentText }}</p>
             </div>
 
             <NProgress
@@ -1089,7 +1223,7 @@ onBeforeUnmount(() => {
               :percentage="progressPercentage"
               :show-indicator="false"
               color="#0f766e"
-              rail-color="#d7e8e3"
+              :rail-color="progressRailColor"
             />
           </div>
 
@@ -1109,8 +1243,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">下个动作</p>
+          <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 transition-colors dark:border-slate-800 dark:bg-slate-950/70">
+            <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">下个动作</p>
             <p class="mt-1 truncate text-lg font-black">{{ nextText }}</p>
           </div>
 
@@ -1160,7 +1294,7 @@ onBeforeUnmount(() => {
               </NTooltip>
 
               <div class="min-w-0">
-                <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700">Workout 3-2-1</p>
+                <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700 dark:text-teal-300">Workout 3-2-1</p>
                 <h1 class="mt-1 text-2xl font-black leading-tight">设置</h1>
               </div>
             </div>
@@ -1168,14 +1302,24 @@ onBeforeUnmount(() => {
 
           <div class="flex items-center justify-between">
             <h2 class="text-base font-black">训练计划</h2>
-            <div class="flex items-center gap-2 text-sm font-bold text-slate-600">
+            <div class="flex items-center gap-2 text-sm font-bold text-slate-600 dark:text-slate-300">
               <span>语音</span>
               <NSwitch v-model:value="voiceEnabled" size="small" />
             </div>
           </div>
 
-          <div class="rounded-lg border border-slate-200 bg-white p-3">
-            <label class="text-sm font-bold text-slate-600" for="voiceSelect">语音声音</label>
+          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
+            <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="themeMode">外观</label>
+            <NSelect
+              id="themeMode"
+              v-model:value="themeMode"
+              class="mt-2"
+              :options="themeModeOptions"
+            />
+          </div>
+
+          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
+            <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="voiceSelect">语音声音</label>
             <NSelect
               id="voiceSelect"
               v-model:value="selectedVoiceId"
@@ -1185,22 +1329,30 @@ onBeforeUnmount(() => {
             />
           </div>
 
-          <div class="rounded-lg border border-slate-200 bg-white p-3">
-            <label class="text-sm font-bold text-slate-600" for="planSelect">当前计划</label>
+          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
+            <div class="flex items-center justify-between gap-2">
+              <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="planSelect">当前计划</label>
+              <NTooltip trigger="hover">
+                <template #trigger>
+                  <NButton
+                    quaternary
+                    circle
+                    size="small"
+                    aria-label="修改当前计划名称"
+                    :disabled="!canEditPlan"
+                    @click="openPlanNameModal"
+                  >
+                    <Pencil :size="16" />
+                  </NButton>
+                </template>
+                修改当前计划名称
+              </NTooltip>
+            </div>
             <NSelect
               id="planSelect"
               v-model:value="activePlanId"
               class="mt-2"
               :options="planOptions"
-              :disabled="!canEditPlan"
-            />
-
-            <label class="mt-3 block text-sm font-bold text-slate-600" for="planName">计划名称</label>
-            <NInput
-              id="planName"
-              v-model:value="currentPlan.name"
-              class="mt-2"
-              placeholder="计划名称"
               :disabled="!canEditPlan"
             />
 
@@ -1228,7 +1380,7 @@ onBeforeUnmount(() => {
                   <NButton
                     aria-label="删除当前计划"
                     :disabled="plans.length <= 1 || !canEditPlan"
-                    @click="removeCurrentPlan"
+                    @click="requestRemoveCurrentPlan"
                   >
                     <template #icon>
                       <Trash2 :size="18" />
@@ -1240,8 +1392,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="rounded-lg border border-slate-200 bg-white p-3">
-            <label class="text-sm font-bold text-slate-600" for="startCountdownSeconds">开始倒计时</label>
+          <div class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900">
+            <label class="text-sm font-bold text-slate-600 dark:text-slate-300" for="startCountdownSeconds">开始倒计时</label>
             <NInputNumber
               id="startCountdownSeconds"
               v-no-stepper-focus
@@ -1255,23 +1407,6 @@ onBeforeUnmount(() => {
             />
           </div>
 
-          <div class="rounded-lg border border-slate-200 bg-white p-3">
-            <label class="text-sm font-bold text-slate-600" for="restSeconds">默认休息秒数</label>
-            <NInputNumber
-              id="restSeconds"
-              v-no-stepper-focus
-              v-model:value="restSeconds"
-              class="mt-2 w-full"
-              :min="0"
-              :max="600"
-              :step="5"
-              :precision="0"
-              button-placement="both"
-              :disabled="!canEditPlan"
-              @update:value="restSeconds = normalizeRestDuration($event)"
-            />
-          </div>
-
           <div class="space-y-2">
             <article
               v-for="(activity, index) in routine"
@@ -1279,10 +1414,10 @@ onBeforeUnmount(() => {
               class="rounded-lg border p-3 transition"
               :class="[
                 draggingActivityId === activity.id
-                  ? 'border-teal-600 bg-teal-50/80 shadow-soft'
-                  : 'border-slate-200 bg-white',
+                  ? 'border-teal-600 bg-teal-50/80 shadow-soft dark:border-teal-300/70 dark:bg-teal-950/50'
+                  : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900',
                 dragOverActivityId === activity.id && draggingActivityId !== activity.id
-                  ? 'ring-2 ring-teal-500/40'
+                  ? 'ring-2 ring-teal-500/40 dark:ring-teal-300/30'
                   : '',
               ]"
               :data-activity-id="activity.id"
@@ -1290,14 +1425,14 @@ onBeforeUnmount(() => {
               <div class="flex items-center gap-2">
                 <button
                   type="button"
-                  class="flex h-9 w-8 shrink-0 touch-none items-center justify-center rounded-lg text-slate-400 transition enabled:cursor-grab enabled:hover:bg-slate-100 enabled:hover:text-teal-700 enabled:active:cursor-grabbing disabled:opacity-35"
+                  class="flex h-9 w-8 shrink-0 touch-none items-center justify-center rounded-lg text-slate-400 transition enabled:cursor-grab enabled:hover:bg-slate-100 enabled:hover:text-teal-700 enabled:active:cursor-grabbing disabled:opacity-35 dark:text-slate-500 dark:enabled:hover:bg-slate-800 dark:enabled:hover:text-teal-300"
                   aria-label="拖动排序"
                   :disabled="!canEditPlan || routine.length <= 1"
                   @pointerdown="startActivityDrag($event, activity.id)"
                 >
                   <GripVertical :size="18" />
                 </button>
-                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-50 font-black text-teal-700">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-50 font-black text-teal-700 dark:bg-teal-950 dark:text-teal-300">
                   {{ index + 1 }}
                 </div>
                 <NInput
@@ -1310,7 +1445,7 @@ onBeforeUnmount(() => {
                   circle
                   aria-label="删除动作"
                   :disabled="routine.length <= 1 || !canEditPlan || isDraggingActivity"
-                  @click="removeActivity(activity.id)"
+                  @click="requestRemoveActivity(activity.id)"
                 >
                   <Trash2 :size="18" />
                 </NButton>
@@ -1318,7 +1453,7 @@ onBeforeUnmount(() => {
 
               <div class="mt-2 grid grid-cols-[minmax(82px,0.85fr)_minmax(88px,1fr)_minmax(104px,1.12fr)] gap-2">
                 <div>
-                  <label class="mb-1 block text-xs font-bold text-slate-500">模式</label>
+                  <label class="mb-1 block text-xs font-bold text-slate-500 dark:text-slate-400">模式</label>
                   <NSelect
                     v-model:value="activity.mode"
                     :options="modeOptions"
@@ -1326,7 +1461,7 @@ onBeforeUnmount(() => {
                   />
                 </div>
                 <div>
-                  <label class="mb-1 block text-xs font-bold text-slate-500">组数</label>
+                  <label class="mb-1 block text-xs font-bold text-slate-500 dark:text-slate-400">组数</label>
                   <NInputNumber
                     v-no-stepper-focus
                     v-model:value="activity.sets"
@@ -1340,7 +1475,7 @@ onBeforeUnmount(() => {
                   />
                 </div>
                 <div>
-                  <label class="mb-1 block text-xs font-bold text-slate-500">
+                  <label class="mb-1 block text-xs font-bold text-slate-500 dark:text-slate-400">
                     {{ activity.mode === 'reps' ? '每组次数' : '每组秒数' }}
                   </label>
                   <NInputNumber
@@ -1357,7 +1492,7 @@ onBeforeUnmount(() => {
 
               <div class="mt-2 grid grid-cols-2 gap-2">
                 <div>
-                  <label class="mb-1 block text-xs font-bold text-slate-500">组间休息</label>
+                  <label class="mb-1 block text-xs font-bold text-slate-500 dark:text-slate-400">组间休息</label>
                   <NInputNumber
                     v-no-stepper-focus
                     v-model:value="activity.setRestSeconds"
@@ -1371,7 +1506,7 @@ onBeforeUnmount(() => {
                   />
                 </div>
                 <div>
-                  <label class="mb-1 block text-xs font-bold text-slate-500">动作间休息</label>
+                  <label class="mb-1 block text-xs font-bold text-slate-500 dark:text-slate-400">动作间休息</label>
                   <NInputNumber
                     v-no-stepper-focus
                     v-model:value="activity.nextRestSeconds"
@@ -1409,40 +1544,40 @@ onBeforeUnmount(() => {
               </NTooltip>
 
               <div class="min-w-0">
-                <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700">Workout 3-2-1</p>
+                <p class="text-xs font-bold uppercase tracking-[0.16em] text-teal-700 dark:text-teal-300">Workout 3-2-1</p>
                 <h1 class="mt-1 text-2xl font-black leading-tight">训练记录</h1>
               </div>
             </div>
           </header>
 
-          <div v-if="workoutHistory.length === 0" class="rounded-lg border border-slate-200 bg-white p-4 text-center">
+          <div v-if="workoutHistory.length === 0" class="rounded-lg border border-slate-200 bg-white p-4 text-center transition-colors dark:border-slate-800 dark:bg-slate-900">
             <p class="text-base font-black">暂无记录</p>
-            <p class="mt-1 text-sm font-semibold text-slate-500">开始训练后会自动保存计划快照。</p>
+            <p class="mt-1 text-sm font-semibold text-slate-500 dark:text-slate-400">开始训练后会自动保存计划快照。</p>
           </div>
 
           <article
             v-for="log in workoutHistory"
             v-else
             :key="log.id"
-            class="rounded-lg border border-slate-200 bg-white p-3"
+            class="rounded-lg border border-slate-200 bg-white p-3 transition-colors dark:border-slate-800 dark:bg-slate-900"
           >
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
-                <p class="text-xs font-bold uppercase tracking-[0.14em] text-teal-700">{{ statusText(log.status) }}</p>
+                <p class="text-xs font-bold uppercase tracking-[0.14em] text-teal-700 dark:text-teal-300">{{ statusText(log.status) }}</p>
                 <h2 class="mt-1 truncate text-lg font-black">{{ log.planName }}</h2>
-                <p class="mt-1 text-sm font-semibold text-slate-500">
+                <p class="mt-1 text-sm font-semibold text-slate-500 dark:text-slate-400">
                   {{ formatDateTime(log.startedAt) }} · {{ formatDuration(log) }}
                 </p>
               </div>
 
-              <NButton quaternary circle aria-label="删除记录" @click="deleteHistoryEntry(log.id)">
+              <NButton quaternary circle aria-label="删除记录" @click="requestDeleteHistoryEntry(log.id)">
                 <Trash2 :size="18" />
               </NButton>
             </div>
 
-            <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2">
-              <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">
-                准备 {{ log.plan.startCountdownSeconds }} 秒 · 默认休息 {{ log.plan.restSeconds }} 秒
+            <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2 transition-colors dark:bg-slate-950/70">
+              <p class="text-xs font-bold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">
+                准备 {{ log.plan.startCountdownSeconds }} 秒
               </p>
               <ol class="mt-2 space-y-1">
                 <li
@@ -1450,8 +1585,8 @@ onBeforeUnmount(() => {
                   :key="`${log.id}-${activity.id}`"
                   class="flex items-start justify-between gap-3 text-sm font-bold"
                 >
-                  <span class="min-w-0 truncate text-slate-800">{{ index + 1 }}. {{ activity.name }}</span>
-                  <span class="shrink-0 text-right text-slate-500">
+                  <span class="min-w-0 truncate text-slate-800 dark:text-slate-200">{{ index + 1 }}. {{ activity.name }}</span>
+                  <span class="shrink-0 text-right text-slate-500 dark:text-slate-400">
                     <span class="block">{{ formatActivityTarget(activity) }}</span>
                     <span class="block text-xs">{{ formatActivityRest(activity, index === log.plan.routine.length - 1) }}</span>
                   </span>
@@ -1470,5 +1605,45 @@ onBeforeUnmount(() => {
         </footer>
       </div>
     </main>
+
+    <NModal v-model:show="isPlanNameModalOpen" :mask-closable="false">
+      <div class="fixed inset-0 flex items-center justify-center p-4">
+        <section class="w-full max-w-[360px] rounded-lg bg-white p-4 shadow-soft transition-colors dark:bg-slate-900">
+          <h2 class="text-lg font-black text-slate-950 dark:text-slate-100">修改计划名称</h2>
+          <label class="mt-4 block text-sm font-bold text-slate-600 dark:text-slate-300" for="planNameDraft">计划名称</label>
+          <NInput
+            id="planNameDraft"
+            v-model:value="planNameDraft"
+            class="mt-2"
+            placeholder="计划名称"
+            autofocus
+            @keydown.enter.prevent="savePlanName"
+          />
+          <div class="mt-4 grid grid-cols-2 gap-2">
+            <NButton @click="closePlanNameModal">取消</NButton>
+            <NButton type="primary" @click="savePlanName">保存</NButton>
+          </div>
+        </section>
+      </div>
+    </NModal>
+
+    <NModal v-model:show="isDeleteConfirmOpen" :mask-closable="false">
+      <div class="fixed inset-0 flex items-center justify-center p-4">
+        <section class="w-full max-w-[360px] rounded-lg bg-white p-4 shadow-soft transition-colors dark:bg-slate-900">
+          <h2 class="text-lg font-black text-slate-950 dark:text-slate-100">
+            {{ pendingDeleteTarget ? pendingDeleteTarget.title : '确认删除？' }}
+          </h2>
+          <p class="mt-2 text-sm font-semibold leading-6 text-slate-600 dark:text-slate-300">
+            {{ pendingDeleteTarget ? pendingDeleteTarget.description : '' }}
+          </p>
+          <div class="mt-4 grid grid-cols-2 gap-2">
+            <NButton @click="closeDeleteConfirm">取消</NButton>
+            <NButton type="error" @click="confirmDelete">
+              {{ pendingDeleteTarget ? pendingDeleteTarget.confirmLabel : '删除' }}
+            </NButton>
+          </div>
+        </section>
+      </div>
+    </NModal>
   </NConfigProvider>
 </template>
