@@ -26,6 +26,7 @@ import {
   NTooltip,
 } from 'naive-ui'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { ObjectDirective } from 'vue'
 
 type ActivityMode = 'reps' | 'time'
 type AppPage = 'workout' | 'settings' | 'history'
@@ -90,6 +91,39 @@ const defaultRoutine: Activity[] = [
   { id: 'pushup', name: '俯卧撑', mode: 'reps', sets: 1, target: 12, setRestSeconds: 30, nextRestSeconds: 30 },
   { id: 'mountain', name: '登山跑', mode: 'time', sets: 1, target: 30, setRestSeconds: 30, nextRestSeconds: 30 },
 ]
+
+const stepperButtonHandlers = new WeakMap<HTMLButtonElement, EventListener>()
+
+function bindStepperButtons(el: HTMLElement) {
+  el.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
+    if (stepperButtonHandlers.has(button)) return
+
+    const handleMouseDown: EventListener = (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      el.querySelector<HTMLInputElement>('input')?.blur()
+    }
+
+    stepperButtonHandlers.set(button, handleMouseDown)
+    button.addEventListener('mousedown', handleMouseDown, { capture: true })
+  })
+}
+
+function unbindStepperButtons(el: HTMLElement) {
+  el.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
+    const handler = stepperButtonHandlers.get(button)
+    if (!handler) return
+
+    button.removeEventListener('mousedown', handler, { capture: true })
+    stepperButtonHandlers.delete(button)
+  })
+}
+
+const vNoStepperFocus: ObjectDirective<HTMLElement> = {
+  mounted: bindStepperButtons,
+  updated: bindStepperButtons,
+  unmounted: unbindStepperButtons,
+}
 
 function createId(prefix: string) {
   if ('randomUUID' in crypto) return `${prefix}-${crypto.randomUUID()}`
@@ -1210,6 +1244,7 @@ onBeforeUnmount(() => {
             <label class="text-sm font-bold text-slate-600" for="startCountdownSeconds">开始倒计时</label>
             <NInputNumber
               id="startCountdownSeconds"
+              v-no-stepper-focus
               v-model:value="startCountdownSeconds"
               class="mt-2 w-full"
               :min="0"
@@ -1224,6 +1259,7 @@ onBeforeUnmount(() => {
             <label class="text-sm font-bold text-slate-600" for="restSeconds">默认休息秒数</label>
             <NInputNumber
               id="restSeconds"
+              v-no-stepper-focus
               v-model:value="restSeconds"
               class="mt-2 w-full"
               :min="0"
@@ -1292,6 +1328,7 @@ onBeforeUnmount(() => {
                 <div>
                   <label class="mb-1 block text-xs font-bold text-slate-500">组数</label>
                   <NInputNumber
+                    v-no-stepper-focus
                     v-model:value="activity.sets"
                     :min="1"
                     :max="99"
@@ -1307,6 +1344,7 @@ onBeforeUnmount(() => {
                     {{ activity.mode === 'reps' ? '每组次数' : '每组秒数' }}
                   </label>
                   <NInputNumber
+                    v-no-stepper-focus
                     v-model:value="activity.target"
                     :min="1"
                     :max="999"
@@ -1321,6 +1359,7 @@ onBeforeUnmount(() => {
                 <div>
                   <label class="mb-1 block text-xs font-bold text-slate-500">组间休息</label>
                   <NInputNumber
+                    v-no-stepper-focus
                     v-model:value="activity.setRestSeconds"
                     :min="0"
                     :max="600"
@@ -1334,6 +1373,7 @@ onBeforeUnmount(() => {
                 <div>
                   <label class="mb-1 block text-xs font-bold text-slate-500">动作间休息</label>
                   <NInputNumber
+                    v-no-stepper-focus
                     v-model:value="activity.nextRestSeconds"
                     :min="0"
                     :max="600"
