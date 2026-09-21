@@ -2,9 +2,45 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens. Light is the default; `.dark` on <html> swaps the palette.
+ * Accent tokens come in four parts:
+ *   --c-<phase>        text/stroke colour, contrast-checked against --c-ground
+ *   --c-<phase>-fill   solid fill (same in both themes, always paired with -on)
+ *   --c-<phase>-on     text drawn on top of -fill
+ *   --c-<phase>-soft   tinted background for pills and badges
+ */
 :root {
-  color: #13201f;
-  background: #f7f8f5;
+  --c-ground: #f3f5f1;
+  --c-surface: #ffffff;
+  --c-raised: #eaeee8;
+  --c-line: #e2e7e0;
+  --c-text: #101815;
+  --c-muted: #5c6b63;
+  --c-faint: #626f67;
+
+  --c-work: #47700f;
+  --c-work-fill: #c8f751;
+  --c-work-on: #0e1512;
+  --c-work-soft: #eaf8c4;
+
+  --c-rest: #10736a;
+  --c-rest-fill: #5be3ce;
+  --c-rest-on: #06201c;
+  --c-rest-soft: #d7f5ef;
+
+  --c-prep: #9a5b00;
+  --c-prep-fill: #ffb545;
+  --c-prep-on: #1a1204;
+  --c-prep-soft: #ffebc9;
+
+  --c-danger: #c0362a;
+  --c-danger-soft: #fce6e3;
+
+  --c-scrim: rgba(16, 24, 21, 0.55);
+
+  color: var(--c-text);
+  background: var(--c-ground);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -12,8 +48,27 @@
 }
 
 :root.dark {
-  color: #f8fafc;
-  background: #020617;
+  --c-ground: #0e1512;
+  --c-surface: #161f1b;
+  --c-raised: #1f2c26;
+  --c-line: #2a3a33;
+  --c-text: #f2f5f2;
+  --c-muted: #8fa096;
+  --c-faint: #7a8c82;
+
+  --c-work: #c8f751;
+  --c-work-soft: #1e2a12;
+
+  --c-rest: #5be3ce;
+  --c-rest-soft: #0f2a26;
+
+  --c-prep: #ffb545;
+  --c-prep-soft: #2e2411;
+
+  --c-danger: #ff7a6b;
+  --c-danger-soft: #2e1512;
+
+  --c-scrim: rgba(4, 9, 7, 0.72);
 }
 
 body {
@@ -21,6 +76,11 @@ body {
   min-height: 100vh;
   margin: 0;
   background: inherit;
+  overscroll-behavior-y: none;
+}
+
+#app {
+  min-height: 100vh;
 }
 
 button,
@@ -28,12 +88,28 @@ input,
 textarea,
 select {
   font: inherit;
+  color: inherit;
 }
 
-#app {
-  min-height: 100vh;
+/* Every number in this app is either counting down or being compared to
+   another number, so none of them may change width while they do it. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 
-.n-button {
-  font-weight: 700;
+/* Native focus rings are invisible against the dark ground. */
+:focus-visible {
+  outline: 2px solid var(--c-work);
+  outline-offset: 2px;
+  border-radius: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
