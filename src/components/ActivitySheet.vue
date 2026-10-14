@@ -2,6 +2,7 @@
 import { Dumbbell, Timer, Trash2 } from 'lucide-vue-next'
 import { computed, ref, watch } from 'vue'
 import BottomSheet from './ui/BottomSheet.vue'
+import ModalDialog from './ui/ModalDialog.vue'
 import NumberStepper from './ui/NumberStepper.vue'
 import QuickChips from './ui/QuickChips.vue'
 import SegmentedControl from './ui/SegmentedControl.vue'
@@ -23,6 +24,8 @@ const emit = defineEmits<{
 }>()
 
 const draft = ref<Activity | null>(null)
+/* Cancel, Escape and a tap on the backdrop all close the sheet; none of them should silently eat edits. */
+const isDiscardOpen = ref(false)
 
 const MODE_OPTIONS = [
   { label: '计次', value: 'reps', icon: Dumbbell },
@@ -37,9 +40,28 @@ watch(
   () => [props.open, props.activity] as const,
   ([open, activity]) => {
     draft.value = open && activity ? { ...activity } : null
+    isDiscardOpen.value = false
   },
   { immediate: true },
 )
+
+const isDirty = computed(() => {
+  const current = draft.value
+  const original = props.activity
+  if (!current || !original) return false
+  return (Object.keys(current) as (keyof Activity)[]).some((key) => current[key] !== original[key])
+})
+
+function requestClose() {
+  if (isDiscardOpen.value) return
+  if (isDirty.value) isDiscardOpen.value = true
+  else emit('close')
+}
+
+function discardChanges() {
+  isDiscardOpen.value = false
+  emit('close')
+}
 
 const isReps = computed(() => draft.value?.mode === 'reps')
 const targetLabel = computed(() => (isReps.value ? '每组次数' : '每组秒数'))
@@ -64,13 +86,13 @@ function save() {
 </script>
 
 <template>
-  <BottomSheet :open="open" title="编辑动作" @close="emit('close')">
+  <BottomSheet :open="open" title="编辑动作" @close="requestClose">
     <template v-if="draft">
       <div class="flex h-11 shrink-0 items-center justify-between gap-3 px-5">
         <button
           type="button"
           class="h-11 text-[15px] font-bold text-muted transition active:opacity-60"
-          @click="emit('close')"
+          @click="requestClose"
         >
           取消
         </button>
@@ -191,4 +213,27 @@ function save() {
       </div>
     </template>
   </BottomSheet>
+
+  <ModalDialog :open="isDiscardOpen" title="放弃修改" @close="isDiscardOpen = false">
+    <h2 class="text-[18px] font-black">放弃修改？</h2>
+    <p class="mt-2.5 text-[14px] font-semibold leading-relaxed text-muted">
+      对这个动作的修改还没有保存，关闭后会丢失。
+    </p>
+    <div class="mt-5 grid grid-cols-2 gap-2.5">
+      <button
+        type="button"
+        class="h-[52px] rounded-[18px] bg-raised text-[15px] font-extrabold transition active:scale-[0.98]"
+        @click="isDiscardOpen = false"
+      >
+        继续编辑
+      </button>
+      <button
+        type="button"
+        class="h-[52px] rounded-[18px] bg-danger text-[15px] font-black text-white transition active:scale-[0.98]"
+        @click="discardChanges"
+      >
+        放弃修改
+      </button>
+    </div>
+  </ModalDialog>
 </template>

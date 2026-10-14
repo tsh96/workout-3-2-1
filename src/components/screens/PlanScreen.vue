@@ -37,13 +37,25 @@ const draggingId = ref<string | null>(null)
 const totalSets = computed(() => countSets(props.plan.routine))
 const estimate = computed(() => formatClock(estimatePlanSeconds(props.plan)))
 
-function onDragMove(event: PointerEvent) {
-  const from = draggingId.value
-  if (!from) return
+const listEl = ref<HTMLElement | null>(null)
+let pointerY = 0
+let scrollFrame = 0
 
-  event.preventDefault()
+/** How close to the list's top or bottom edge a dragged row has to be before the list scrolls. */
+const AUTO_SCROLL_EDGE = 36
+const AUTO_SCROLL_MAX_STEP = 10
+
+function reorderUnderPointer() {
+  const from = draggingId.value
+  const list = listEl.value
+  if (!from || !list) return
+
+  // Hit-test down the middle of the list, clamped inside it, so a finger that
+  // has slid past the edge still targets the row at that edge.
+  const rect = list.getBoundingClientRect()
+  const y = Math.min(Math.max(pointerY, rect.top + 1), rect.bottom - 1)
   const target = document
-    .elementFromPoint(event.clientX, event.clientY)
+    .elementFromPoint(rect.left + rect.width / 2, y)
     ?.closest<HTMLElement>('[data-activity-id]')
   const to = target?.dataset.activityId
   if (!to || to === from) return
@@ -51,7 +63,38 @@ function onDragMove(event: PointerEvent) {
   emit('reorder', from, to)
 }
 
+/** Keep scrolling while the dragged row is held near (or past) the top or bottom of the list. */
+function autoScroll() {
+  const list = listEl.value
+  if (!draggingId.value || !list) return
+
+  const rect = list.getBoundingClientRect()
+  let speed = 0
+  if (pointerY < rect.top + AUTO_SCROLL_EDGE) {
+    speed = -Math.min(1, (rect.top + AUTO_SCROLL_EDGE - pointerY) / AUTO_SCROLL_EDGE)
+  } else if (pointerY > rect.bottom - AUTO_SCROLL_EDGE) {
+    speed = Math.min(1, (pointerY - rect.bottom + AUTO_SCROLL_EDGE) / AUTO_SCROLL_EDGE)
+  }
+
+  if (speed !== 0) {
+    const before = list.scrollTop
+    list.scrollTop += speed * AUTO_SCROLL_MAX_STEP
+    if (list.scrollTop !== before) reorderUnderPointer()
+  }
+
+  scrollFrame = requestAnimationFrame(autoScroll)
+}
+
+function onDragMove(event: PointerEvent) {
+  if (!draggingId.value) return
+
+  event.preventDefault()
+  pointerY = event.clientY
+  reorderUnderPointer()
+}
+
 function stopDrag() {
+  cancelAnimationFrame(scrollFrame)
   window.removeEventListener('pointermove', onDragMove)
   window.removeEventListener('pointerup', stopDrag)
   window.removeEventListener('pointercancel', stopDrag)
@@ -63,6 +106,8 @@ function startDrag(event: PointerEvent, id: string) {
 
   event.preventDefault()
   draggingId.value = id
+  pointerY = event.clientY
+  scrollFrame = requestAnimationFrame(autoScroll)
   if (event.currentTarget instanceof HTMLElement) {
     event.currentTarget.setPointerCapture?.(event.pointerId)
   }
@@ -173,7 +218,11 @@ onBeforeUnmount(stopDrag)
       <p class="tnum text-[12px] font-extrabold text-work">预计 {{ estimate }}</p>
     </div>
 
-    <ol class="flex min-h-0 flex-grow flex-col gap-2 overflow-y-auto px-5 pt-2.5">
+    <!-- No scroll anchoring: it would undo the auto-scroll every time a dragged row hops up past the anchor. -->
+    <ol
+      ref="listEl"
+      class="flex min-h-0 flex-grow flex-col gap-2 overflow-y-auto px-5 pt-2.5 [overflow-anchor:none]"
+    >
       <li
         v-for="(activity, index) in plan.routine"
         :key="activity.id"

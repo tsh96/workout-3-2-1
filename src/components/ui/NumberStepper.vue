@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Minus, Plus } from 'lucide-vue-next'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = withDefaults(
   defineProps<{
@@ -23,6 +23,10 @@ const emit = defineEmits<{ 'update:modelValue': [value: number] }>()
 const buttonSize = computed(() => (props.compact ? 'h-11 w-11' : 'h-12 w-12'))
 const boxHeight = computed(() => (props.compact ? 'h-11' : 'h-12'))
 
+/* Stepping 5 s at a time is fine for small nudges, so the readout also takes a typed value. */
+const typed = ref<string | null>(null)
+const shown = computed(() => typed.value ?? String(props.modelValue))
+
 function clamp(value: number) {
   return Math.max(props.min, Math.min(props.max, value))
 }
@@ -30,6 +34,27 @@ function clamp(value: number) {
 function nudge(direction: 1 | -1) {
   if (props.disabled) return
   const next = clamp(props.modelValue + direction * props.step)
+  if (next !== props.modelValue) emit('update:modelValue', next)
+}
+
+function beginTyping(event: FocusEvent) {
+  typed.value = String(props.modelValue)
+  const input = event.target as HTMLInputElement
+  input.select()
+}
+
+function onType(event: Event) {
+  const input = event.target as HTMLInputElement
+  typed.value = input.value.replace(/\D/g, '').slice(0, String(props.max).length)
+  input.value = typed.value
+}
+
+function commitTyping() {
+  const parsed = Number.parseInt(typed.value ?? '', 10)
+  typed.value = null
+  if (Number.isNaN(parsed)) return
+
+  const next = clamp(parsed)
   if (next !== props.modelValue) emit('update:modelValue', next)
 }
 </script>
@@ -49,12 +74,28 @@ function nudge(direction: 1 | -1) {
     >
       <Minus :size="16" :stroke-width="2.8" />
     </button>
-    <span
-      class="tnum text-center text-[17px] font-black leading-none"
+    <label
+      class="tnum flex h-full cursor-text items-center justify-center text-[17px] font-black leading-none transition-colors focus-within:bg-surface"
       :style="{ width: `${valueWidth}px` }"
-      aria-live="off"
-      >{{ modelValue }}{{ suffix }}</span
     >
+      <input
+        type="text"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        enterkeyhint="done"
+        autocomplete="off"
+        class="min-w-0 bg-transparent p-0 text-center outline-none disabled:cursor-default"
+        :style="{ width: `${Math.max(shown.length, 1)}ch` }"
+        :value="shown"
+        :aria-label="label"
+        :disabled="disabled"
+        @focus="beginTyping"
+        @input="onType"
+        @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+        @blur="commitTyping"
+      />
+      <span v-if="suffix" class="whitespace-pre" aria-hidden="true">{{ suffix }}</span>
+    </label>
     <button
       type="button"
       class="flex items-center justify-center text-muted transition active:scale-95 disabled:opacity-40"

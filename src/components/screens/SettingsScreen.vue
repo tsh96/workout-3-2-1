@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ArrowLeft, ChevronRight, Download, Monitor, Moon, Sun, Trash2 } from 'lucide-vue-next'
+import { computed } from 'vue'
 import AppToggle from '../ui/AppToggle.vue'
 import NumberStepper from '../ui/NumberStepper.vue'
 import SegmentedControl from '../ui/SegmentedControl.vue'
 import type { AppSettings } from '../../lib/types'
 
-defineProps<{
+const props = defineProps<{
   settings: AppSettings
   voiceOptions: { label: string; value: string }[]
   selectedVoiceLabel: string
@@ -13,6 +14,7 @@ defineProps<{
   wakeLockSupported: boolean
   hapticsSupported: boolean
   version: string
+  hasHistory: boolean
 }>()
 
 const emit = defineEmits<{
@@ -21,6 +23,10 @@ const emit = defineEmits<{
   exportData: []
   clearHistory: []
 }>()
+
+/** Both of these only shape what gets spoken, so they go quiet along with the voice. */
+const isVoiceOff = computed(() => !props.settings.voiceEnabled)
+const isVoicePickerDisabled = computed(() => isVoiceOff.value || props.voiceOptions.length <= 1)
 
 const THEME_OPTIONS = [
   { label: '跟随系统', value: 'system', icon: Monitor },
@@ -63,7 +69,10 @@ const THEME_OPTIONS = [
 
       <div class="h-px bg-line"></div>
 
-      <div class="relative flex h-[62px] items-center justify-between gap-3">
+      <div
+        class="relative flex h-[62px] items-center justify-between gap-3 transition-opacity"
+        :class="isVoicePickerDisabled ? 'opacity-40' : ''"
+      >
         <div class="min-w-0">
           <p class="text-[15px] font-bold">语音声音</p>
           <p class="mt-0.5 truncate text-[11px] font-semibold text-muted">
@@ -72,10 +81,10 @@ const THEME_OPTIONS = [
         </div>
         <ChevronRight :size="18" :stroke-width="2.4" class="shrink-0 text-faint" />
         <select
-          class="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0"
+          class="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 disabled:cursor-default"
           aria-label="语音声音"
           :value="settings.voiceId"
-          :disabled="!settings.voiceEnabled || voiceOptions.length <= 1"
+          :disabled="isVoicePickerDisabled"
           @change="emit('update', { voiceId: ($event.target as HTMLSelectElement).value })"
         >
           <option v-for="option in voiceOptions" :key="option.value" :value="option.value">
@@ -88,7 +97,7 @@ const THEME_OPTIONS = [
 
       <div class="py-3.5">
         <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
+          <div class="min-w-0 transition-opacity" :class="isVoiceOff ? 'opacity-40' : ''">
             <p class="text-[15px] font-bold">倒数提示</p>
             <p class="mt-0.5 text-[11px] font-semibold text-muted">结束前从第几秒开始报数</p>
           </div>
@@ -99,10 +108,14 @@ const THEME_OPTIONS = [
             :max="30"
             :value-width="42"
             compact
+            :disabled="isVoiceOff"
             @update:model-value="emit('update', { countdownPromptStartSeconds: $event })"
           />
         </div>
-        <p class="tnum mt-2.5 text-[12px] font-semibold leading-relaxed text-faint">
+        <p
+          class="tnum mt-2.5 text-[12px] font-semibold leading-relaxed text-faint transition-opacity"
+          :class="isVoiceOff ? 'opacity-40' : ''"
+        >
           现在会从 {{ settings.countdownPromptStartSeconds }} 开始报数，然后进入下一步。
         </p>
       </div>
@@ -169,7 +182,8 @@ const THEME_OPTIONS = [
       <div class="h-px bg-line"></div>
       <button
         type="button"
-        class="flex h-[58px] w-full items-center justify-between gap-3 text-left transition active:opacity-60"
+        class="flex h-[58px] w-full items-center justify-between gap-3 text-left transition active:opacity-60 disabled:opacity-40"
+        :disabled="!hasHistory"
         @click="emit('clearHistory')"
       >
         <span class="text-[15px] font-bold text-danger">清空全部训练记录</span>

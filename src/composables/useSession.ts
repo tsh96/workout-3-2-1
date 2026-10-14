@@ -303,6 +303,12 @@ export function useSession(
   }
 
   function skip() {
+    // Moving on means you are back; don't leave the next step frozen on a paused clock.
+    if (!isRunning.value && (phase.value === 'countdown' || phase.value === 'action' || phase.value === 'rest')) {
+      isRunning.value = true
+      startTimer()
+    }
+
     if (phase.value === 'countdown') {
       startAction(0, 0)
       return

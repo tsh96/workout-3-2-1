@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, onMounted, ref, type Ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 
 const supported = typeof window !== 'undefined' && 'speechSynthesis' in window
 
@@ -107,6 +107,11 @@ export function useSpeech(enabled: Ref<boolean>, voiceId: Ref<string>) {
 
     play()
   }
+
+  // Muting should silence the sentence already being read, not just the next one.
+  watch(enabled, (isEnabled) => {
+    if (!isEnabled) cancel()
+  })
 
   onMounted(() => {
     loadVoices()

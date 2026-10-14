@@ -84,7 +84,10 @@ const ACCENTS = {
 
 const tone = computed(() => ACCENTS[props.accent])
 
+const isPaused = computed(() => !props.isRunning && props.phase !== 'done')
+
 const phaseLabel = computed(() => {
+  if (isPaused.value) return '已 暂 停'
   if (props.phase === 'countdown') return '准 备 开 始'
   if (props.phase === 'rest') return props.restLabel
   return props.currentActivity?.mode === 'reps' ? '计次动作 · 自己掌握节奏' : '计时动作'
@@ -165,10 +168,9 @@ const restPercent = computed(() =>
         </button>
       </header>
 
-      <main
-        class="flex flex-grow flex-col items-center justify-center gap-7 overflow-y-auto px-6 py-2"
-      >
-        <ProgressRing :size="168" :stroke="10" :progress="1" color="var(--c-work)">
+      <!-- Auto margins rather than justify-center: centred when it fits, scrollable from the top when it doesn't. -->
+      <main class="flex flex-grow flex-col items-center gap-7 overflow-y-auto px-6 py-2">
+        <ProgressRing class="mt-auto" :size="168" :stroke="10" :progress="1" color="var(--c-work)">
           <Check :size="76" :stroke-width="2.3" class="text-work" />
         </ProgressRing>
 
@@ -204,7 +206,7 @@ const restPercent = computed(() =>
           </div>
         </div>
 
-        <div class="flex w-full items-center gap-2.5">
+        <div class="mb-auto flex w-full items-center gap-2.5">
           <span class="h-px flex-grow bg-line"></span>
           <span class="text-[11px] font-extrabold tracking-[0.16em] text-faint">已保存到记录</span>
           <span class="h-px flex-grow bg-line"></span>
@@ -263,7 +265,7 @@ const restPercent = computed(() =>
       <div class="shrink-0 px-6 pt-1.5 text-center">
         <p
           class="inline-flex h-7 items-center rounded-full px-3.5 text-[11px] font-extrabold tracking-[0.16em] transition-colors"
-          :class="tone.pill"
+          :class="isPaused ? 'bg-ink text-ground' : tone.pill"
         >
           {{ phaseLabel }}
         </p>
@@ -296,7 +298,10 @@ const restPercent = computed(() =>
         </p>
       </div>
 
-      <main class="flex min-h-0 flex-grow items-center justify-center px-5">
+      <main
+        class="flex min-h-0 flex-grow items-center justify-center px-5 transition-opacity"
+        :class="isPaused ? 'opacity-40' : ''"
+      >
         <ProgressRing
           :size="288"
           fluid

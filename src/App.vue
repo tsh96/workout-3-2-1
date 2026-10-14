@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ActivitySheet from './components/ActivitySheet.vue'
 import HistoryScreen from './components/screens/HistoryScreen.vue'
 import PlanScreen from './components/screens/PlanScreen.vue'
@@ -84,6 +84,12 @@ function recordEnd(status: 'completed' | 'stopped', completedSets: number) {
   activeLogId = null
   if (!log || log.status !== 'started') return
 
+  // Quitting before a single set is done is a false start, not a workout worth keeping.
+  if (status === 'stopped' && completedSets === 0) {
+    history.value = history.value.filter((entry) => entry.id !== log.id)
+    return
+  }
+
   log.status = status
   log.completedAt = new Date().toISOString()
   log.completedSets = Math.min(completedSets, log.totalSets)
@@ -102,12 +108,26 @@ const keepScreenAwake = computed(
 )
 const wakeLock = useWakeLock(keepScreenAwake)
 
-const editingActivity = computed(
-  () => routine.value.find((activity) => activity.id === editingActivityId.value) ?? null,
+// An added activity stays out of the routine until it is saved, so cancelling leaves nothing behind.
+const newActivity = ref<Activity | null>(null)
+const isAddingActivity = computed(
+  () => newActivity.value !== null && newActivity.value.id === editingActivityId.value,
+)
+
+const editingActivity = computed(() =>
+  isAddingActivity.value
+    ? newActivity.value
+    : (routine.value.find((activity) => activity.id === editingActivityId.value) ?? null),
 )
 const editingIndex = computed(() =>
-  routine.value.findIndex((activity) => activity.id === editingActivityId.value),
+  isAddingActivity.value
+    ? routine.value.length
+    : routine.value.findIndex((activity) => activity.id === editingActivityId.value),
 )
+
+watch(editingActivityId, (id) => {
+  if (newActivity.value && newActivity.value.id !== id) newActivity.value = null
+})
 
 watch(
   [plans, history, settings, activePlanId],
@@ -186,9 +206,15 @@ function duplicatePlan() {
   activePlanId.value = copy.id
 }
 
-function openRename() {
+const renameInput = ref<HTMLInputElement | null>(null)
+
+async function openRename() {
   renameDraft.value = currentPlan.value.name
   isRenameOpen.value = true
+  // Opening the dialog is asking to type, so put the cursor there with the old name selected.
+  await nextTick()
+  renameInput.value?.focus()
+  renameInput.value?.select()
 }
 
 function saveRename() {
@@ -214,13 +240,14 @@ function updateCountdown(seconds: number) {
 
 function addActivity() {
   const activity = createActivity()
-  currentPlan.value.routine.push(activity)
+  newActivity.value = activity
   editingActivityId.value = activity.id
 }
 
 function saveActivity(activity: Activity) {
   const index = routine.value.findIndex((entry) => entry.id === activity.id)
   if (index !== -1) currentPlan.value.routine.splice(index, 1, activity)
+  else if (activity.id === newActivity.value?.id) currentPlan.value.routine.push(activity)
   editingActivityId.value = null
 }
 
@@ -348,6 +375,36 @@ function stopSession() {
   session.reset()
 }
 
+/* One stray tap on ✕ shouldn't throw a workout away, so mid-session it asks first, on a paused clock. */
+const isStopConfirmOpen = ref(false)
+let resumeAfterStopConfirm = false
+
+function requestStop() {
+  const phase = session.phase.value
+  if (phase === 'done' || phase === 'countdown') {
+    stopSession()
+    return
+  }
+
+  resumeAfterStopConfirm = session.isRunning.value
+  if (resumeAfterStopConfirm) session.togglePause()
+  isStopConfirmOpen.value = true
+}
+
+function cancelStop() {
+  isStopConfirmOpen.value = false
+  if (resumeAfterStopConfirm && session.isActive.value && !session.isRunning.value) {
+    session.togglePause()
+  }
+  resumeAfterStopConfirm = false
+}
+
+function confirmStop() {
+  isStopConfirmOpen.value = false
+  resumeAfterStopConfirm = false
+  stopSession()
+}
+
 function restartSession() {
   session.reset()
   session.start()
@@ -394,7 +451,7 @@ onBeforeUnmount(() => {
     :upcoming-rest="session.upcomingRest.value"
     :voice-enabled="settings.voiceEnabled"
     :activity-count="routine.length"
-    @stop="stopSession"
+    @stop="requestStop"
     @toggle-pause="session.togglePause"
     @skip="session.skip"
     @adjust-rest="session.adjustRest"
@@ -412,6 +469,7 @@ onBeforeUnmount(() => {
     :wake-lock-supported="wakeLock.supported"
     :haptics-supported="haptics.supported"
     :version="appVersion"
+    :has-history="history.length > 0"
     @back="closeSettings"
     @update="updateSettings"
     @export-data="exportData"
@@ -458,8 +516,8 @@ onBeforeUnmount(() => {
     :open="editingActivity !== null"
     :activity="editingActivity"
     :position="editingIndex + 1"
-    :is-last="editingIndex === routine.length - 1"
-    :can-delete="routine.length > 1"
+    :is-last="editingIndex >= routine.length - 1"
+    :can-delete="!isAddingActivity && routine.length > 1"
     @close="editingActivityId = null"
     @save="saveActivity"
     @remove="askDeleteActivity"
@@ -472,6 +530,7 @@ onBeforeUnmount(() => {
     </label>
     <input
       id="planName"
+      ref="renameInput"
       v-model="renameDraft"
       type="text"
       maxlength="24"
@@ -520,6 +579,33 @@ onBeforeUnmount(() => {
         @click="confirmDelete"
       >
         {{ pendingDelete?.confirmLabel }}
+      </button>
+    </div>
+  </ModalDialog>
+
+  <ModalDialog :open="isStopConfirmOpen" title="结束训练" @close="cancelStop">
+    <h2 class="text-[18px] font-black">结束这次训练？</h2>
+    <p class="mt-2.5 text-[14px] font-semibold leading-relaxed text-muted">
+      {{
+        session.completedSets.value > 0
+          ? `已完成 ${session.completedSets.value} / ${session.totalSets.value} 组，会保存到记录。`
+          : '还没有完成任何一组，这次不会留下记录。'
+      }}
+    </p>
+    <div class="mt-5 grid grid-cols-2 gap-2.5">
+      <button
+        type="button"
+        class="h-[52px] rounded-[18px] bg-raised text-[15px] font-extrabold transition active:scale-[0.98]"
+        @click="cancelStop"
+      >
+        继续训练
+      </button>
+      <button
+        type="button"
+        class="h-[52px] rounded-[18px] bg-danger text-[15px] font-black text-white transition active:scale-[0.98]"
+        @click="confirmStop"
+      >
+        结束训练
       </button>
     </div>
   </ModalDialog>
