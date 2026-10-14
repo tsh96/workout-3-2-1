@@ -34,7 +34,7 @@ onBeforeUnmount(() => {
     >
       <div
         v-if="open"
-        class="fixed inset-0 z-40 flex items-center justify-center bg-scrim p-5"
+        class="fixed inset-0 z-[60] flex items-center justify-center bg-scrim p-5"
         @click.self="emit('close')"
       >
         <section
